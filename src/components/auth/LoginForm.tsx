@@ -21,7 +21,6 @@ import {
   UserPlus
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { projectId, publicAnonKey } from '../../utils/supabase/info';
 
 interface LoginCredentials {
   email: string;
@@ -106,30 +105,28 @@ export function LoginForm({ onSignIn }: LoginFormProps = {}) {
     setError(null);
 
     try {
-      const response = await fetch(
-        `https://${projectId}.supabase.co/functions/v1/make-server-24d52f89/auth/signup`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${publicAnonKey}`
-          },
-          body: JSON.stringify({
-            email: signupData.email,
-            password: signupData.password,
-            name: signupData.name,
-            role: signupData.role
-          })
+      // Use Supabase's built-in signUp method directly
+      const { data, error } = await supabase.auth.signUp({
+        email: signupData.email,
+        password: signupData.password,
+        options: {
+          data: {
+            name: signupData.name || '',
+            role: signupData.role || 'assessor'
+          }
         }
-      );
+      });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Signup failed');
+      if (error) {
+        throw new Error(error.message || 'Signup failed');
       }
 
-      setSignupSuccess(true);
+      // Check if user was created successfully
+      if (data.user) {
+        setSignupSuccess(true);
+      } else {
+        throw new Error('Failed to create account');
+      }
     } catch (err: any) {
       console.error('Signup error:', err);
       setError(err.message || 'Failed to create account');
