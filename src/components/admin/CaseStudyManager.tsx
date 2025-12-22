@@ -51,6 +51,8 @@ export function CaseStudyManager({
   const [editingCaseStudy, setEditingCaseStudy] = useState<CaseStudy | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   const [newCaseStudy, setNewCaseStudy] = useState({
     name: '',
@@ -59,33 +61,57 @@ export function CaseStudyManager({
 
   const handleEditCaseStudy = (caseStudy: CaseStudy) => {
     setEditingCaseStudy(caseStudy);
+    setIsEditDialogOpen(true);
   };
 
-  const handleSaveEdit = () => {
+  const handleSaveEdit = async () => {
     if (editingCaseStudy) {
-      onUpdateCaseStudy(editingCaseStudy.id, {
-        ...editingCaseStudy,
-        lastModified: new Date()
-      });
-      setEditingCaseStudy(null);
+      setIsSaving(true);
+      try {
+        await onUpdateCaseStudy(editingCaseStudy.id, {
+          ...editingCaseStudy,
+          lastModified: new Date()
+        });
+        toast.success('Case study updated successfully!');
+        setEditingCaseStudy(null);
+        setIsEditDialogOpen(false);
+      } catch (error) {
+        toast.error('Failed to update case study. Please try again.');
+        console.error('Save error:', error);
+      } finally {
+        setIsSaving(false);
+      }
     }
   };
 
-  const handleAddCaseStudy = () => {
+  const handleCancelEdit = () => {
+    setEditingCaseStudy(null);
+    setIsEditDialogOpen(false);
+  };
+
+  const handleAddCaseStudy = async () => {
     if (!newCaseStudy.name.trim()) {
       toast.error('Case study name is required');
       return;
     }
 
-    onAddCaseStudy({
-      ...newCaseStudy,
-      createdDate: new Date(),
-      lastModified: new Date(),
-      usageCount: 0
-    });
-
-    setNewCaseStudy({ name: '', description: '' });
-    setShowAddForm(false);
+    setIsSaving(true);
+    try {
+      await onAddCaseStudy({
+        ...newCaseStudy,
+        createdDate: new Date(),
+        lastModified: new Date(),
+        usageCount: 0
+      });
+      toast.success('Case study created successfully!');
+      setNewCaseStudy({ name: '', description: '' });
+      setShowAddForm(false);
+    } catch (error) {
+      toast.error('Failed to create case study. Please try again.');
+      console.error('Create error:', error);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const filteredCaseStudies = caseStudies.filter(cs =>
@@ -210,14 +236,16 @@ export function CaseStudyManager({
                 <Button 
                   onClick={handleAddCaseStudy} 
                   className="bg-slate-600 hover:bg-slate-700 rounded-xl card-shadow"
+                  disabled={isSaving}
                 >
                   <Save className="w-4 h-4 mr-2" />
-                  Create Case Study
+                  {isSaving ? 'Creating...' : 'Create Case Study'}
                 </Button>
                 <Button 
                   variant="outline" 
                   onClick={() => setShowAddForm(false)}
                   className="rounded-xl"
+                  disabled={isSaving}
                 >
                   <X className="w-4 h-4 mr-2" />
                   Cancel
@@ -285,7 +313,7 @@ export function CaseStudyManager({
                   <div className="divider-luxury"></div>
 
                   <div className="flex gap-3">
-                    <Dialog>
+                    <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
                       <DialogTrigger asChild>
                         <Button 
                           variant="outline" 
@@ -340,14 +368,16 @@ export function CaseStudyManager({
                               <Button 
                                 onClick={handleSaveEdit} 
                                 className="bg-slate-600 hover:bg-slate-700 rounded-xl"
+                                disabled={isSaving}
                               >
                                 <Save className="w-4 h-4 mr-2" />
-                                Save Changes
+                                {isSaving ? 'Saving...' : 'Save Changes'}
                               </Button>
                               <Button 
                                 variant="outline" 
-                                onClick={() => setEditingCaseStudy(null)}
+                                onClick={handleCancelEdit}
                                 className="rounded-xl"
+                                disabled={isSaving}
                               >
                                 <X className="w-4 h-4 mr-2" />
                                 Cancel
@@ -390,7 +420,10 @@ export function CaseStudyManager({
                         <AlertDialogFooter>
                           <AlertDialogCancel className="rounded-xl">Cancel</AlertDialogCancel>
                           <AlertDialogAction 
-                            onClick={() => onDeleteCaseStudy(caseStudy.id)}
+                            onClick={() => {
+                              onDeleteCaseStudy(caseStudy.id);
+                              toast.success('Case study deleted successfully!');
+                            }}
                             className="bg-red-600 hover:bg-red-700 rounded-xl"
                             disabled={getCaseStudyUsage(caseStudy.name) > 0}
                           >

@@ -852,15 +852,19 @@ export default function App() {
   const handleViewAnalytics = () => setCurrentView("analytics");
   const handleViewManagement = () => setCurrentView("management");
 
-  // FIXED: Update case study directly via Supabase
+  
   const handleUpdateCaseStudy = async (id: string, updates: any) => {
-    try {
-      const { error } = await supabase
-        .from('case_studies')
-        .update(updates)
-        .eq('id', id);
+  try {
+    // Only send fields that exist in the database
+    const { error } = await supabase
+      .from('case_studies')
+      .update({
+        name: updates.name,
+        description: updates.description
+      })
+      .eq('id', id);
 
-      if (error) throw error;
+    if (error) throw error;
 
       setCaseStudies((prev) => prev.map((cs: any) => (cs.id === id ? { ...cs, ...updates } : cs)));
       toast.success("Case study updated successfully");
