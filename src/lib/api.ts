@@ -2,41 +2,96 @@
 import { projectId, publicAnonKey } from "../utils/supabase/info";
 import { supabase } from "./supabase";
 
-const API_BASE = `https://${projectId}.supabase.co/functions/v1/make-server`;
+/**
+ * Pick ONE base style and be consistent.
+ *
+ * Recommended (standard Supabase style):
+ *   https://<project-ref>.supabase.co/functions/v1/<function-name>
+ *
+ * Alternative (works too):
+ *   https://<project-ref>.functions.supabase.co/<function-name>
+ *
+ * Your deployed function name is: make-server
+ */
+const API_BASE =
+  // If you ever want to override from .env:
+  // (import.meta.env.VITE_FUNCTIONS_BASE_URL as string) ??
+  `https://${projectId}.supabase.co/functions/v1/make-server`;
 
-// Get JWT if logged in, otherwise return null (DO NOT use anon key as Bearer)
+// If you prefer the functions domain instead, swap to this:
+// const API_BASE = `https://${projectId}.functions.supabase.co/make-server`;
+
+// Get user JWT if logged in (DO NOT use anon key as Bearer)
 const getJwt = async (): Promise<string | null> => {
-  const { data } = await supabase.auth.getSession();
+  const { data, error } = await supabase.auth.getSession();
+  if (error) return null;
   return data.session?.access_token ?? null;
 };
 
-// Helper for API calls
+type ApiErrorPayload =
+  | { error?: string; message?: string; code?: string }
+  | Record<string, any>;
+
+/**
+ * Helper for API calls
+ */
 const apiCall = async (endpoint: string, options: RequestInit = {}) => {
   const jwt = await getJwt();
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    // Supabase Edge Functions require apikey header for browser calls
-    apikey: publicAnonKey,
-    ...(options.headers as Record<string, string>),
-  };
+  // Merge headers safely
+  const headers = new Headers(options.headers ?? {});
+  headers.set("Content-Type", "application/json");
+  headers.set("apikey", publicAnonKey);
 
-  // Only attach Authorization if we have a real JWT
+  // Only attach Authorization if we have a real user JWT
   if (jwt) {
-    headers.Authorization = `Bearer ${jwt}`;
+    headers.set("Authorization", `Bearer ${jwt}`);
+  } else {
+    // IMPORTANT: if your endpoint is protected, it will 401.
+    // We'll throw a clean error below if that happens.
+    headers.delete("Authorization");
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
+  const url = `${API_BASE}${endpoint}`;
+
+  const response = await fetch(url, {
     ...options,
     headers,
   });
 
+  // Handle non-OK responses with useful messages
   if (!response.ok) {
-    const err = await response.json().catch(() => ({ error: "Request failed" }));
-    throw new Error(err.error || `API call failed: ${response.status} ${response.statusText}`);
+    let payload: ApiErrorPayload | null = null;
+
+    // Try JSON first, otherwise fallback to text
+    const contentType = response.headers.get("content-type") || "";
+    try {
+      if (contentType.includes("application/json")) {
+        payload = (await response.json()) as ApiErrorPayload;
+      } else {
+        const text = await response.text();
+        payload = { error: text };
+      }
+    } catch {
+      payload = { error: "Request failed" };
+    }
+
+    const msg =
+      (payload && (payload.error || payload.message)) ||
+      `API call failed: ${response.status} ${response.statusText}`;
+
+    // A very common case in your project:
+    // profile/events/etc called before login => 401
+    if (response.status === 401 && !jwt) {
+      throw new Error("Not signed in (missing user session token). Please sign in again.");
+    }
+
+    throw new Error(msg);
   }
 
-  return response.json();
+  // Some endpoints might return empty body (rare), so guard json parsing
+  const text = await response.text();
+  return text ? JSON.parse(text) : {};
 };
 
 // ==================== EVENT API ====================
