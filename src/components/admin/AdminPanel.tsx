@@ -7,14 +7,6 @@ import { Badge } from '../ui/badge';
 import { Label } from '../ui/label';
 import { Textarea } from '../ui/textarea';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '../ui/dialog';
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -35,8 +27,6 @@ import {
   Search,
   Edit,
   Trash2,
-  Upload,
-  BookOpen,
   Loader2,
   X
 } from 'lucide-react';
@@ -99,6 +89,57 @@ interface CaseStudy {
   created_at: string;
 }
 
+// Custom Modal Component
+function Modal({ 
+  isOpen, 
+  onClose, 
+  title, 
+  description, 
+  children 
+}: { 
+  isOpen: boolean; 
+  onClose: () => void; 
+  title: string; 
+  description?: string;
+  children: React.ReactNode;
+}) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <div 
+        className="fixed inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      
+      {/* Modal Content */}
+      <div className="relative z-50 w-full max-w-lg mx-4 bg-white rounded-xl shadow-2xl border border-gray-200 animate-in fade-in zoom-in-95 duration-200">
+        {/* Header */}
+        <div className="flex items-center justify-between p-6 border-b border-gray-200">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
+            {description && (
+              <p className="text-sm text-gray-500 mt-1">{description}</p>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
+        
+        {/* Body */}
+        <div className="p-6">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AdminPanel() {
   const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -113,15 +154,12 @@ export function AdminPanel() {
 
   // Modal state
   const [showEventModal, setShowEventModal] = useState(false);
-  const [showUserModal, setShowUserModal] = useState(false);
   const [showCandidateModal, setShowCandidateModal] = useState(false);
   const [showGroupModal, setShowGroupModal] = useState(false);
-  const [showAssignmentModal, setShowAssignmentModal] = useState(false);
   const [showCaseStudyModal, setShowCaseStudyModal] = useState(false);
   
   // Edit state
   const [editingEvent, setEditingEvent] = useState<Event | null>(null);
-  const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
   const [editingGroup, setEditingGroup] = useState<Group | null>(null);
   const [editingCaseStudy, setEditingCaseStudy] = useState<CaseStudy | null>(null);
@@ -133,12 +171,6 @@ export function AdminPanel() {
     status: 'upcoming' as 'upcoming' | 'active' | 'completed',
     start_date: '',
     end_date: ''
-  });
-
-  const [userForm, setUserForm] = useState({
-    email: '',
-    name: '',
-    role: 'assessor' as 'admin' | 'assessor'
   });
 
   const [candidateForm, setCandidateForm] = useState({
@@ -1436,74 +1468,74 @@ export function AdminPanel() {
       </Tabs>
 
       {/* Event Modal */}
-      <Dialog open={showEventModal} onOpenChange={setShowEventModal}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
-            <DialogTitle>{editingEvent ? 'Edit Event' : 'Create New Event'}</DialogTitle>
-            <DialogDescription>
-              {editingEvent ? 'Update the event details below.' : 'Fill in the details for your new event.'}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="event-name">Event Name *</Label>
+      <Modal
+        isOpen={showEventModal}
+        onClose={() => {
+          setShowEventModal(false);
+          setEditingEvent(null);
+        }}
+        title={editingEvent ? 'Edit Event' : 'Create New Event'}
+        description={editingEvent ? 'Update the event details below.' : 'Fill in the details for your new event.'}
+      >
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="event-name">Event Name *</Label>
+            <Input
+              id="event-name"
+              value={eventForm.name}
+              onChange={(e) => setEventForm({ ...eventForm, name: e.target.value })}
+              placeholder="e.g., Leadership Assessment 2024"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="event-description">Description</Label>
+            <Textarea
+              id="event-description"
+              value={eventForm.description}
+              onChange={(e) => setEventForm({ ...eventForm, description: e.target.value })}
+              placeholder="Brief description of the event..."
+              rows={3}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="event-status">Status</Label>
+            <Select 
+              value={eventForm.status} 
+              onValueChange={(value: 'upcoming' | 'active' | 'completed') => 
+                setEventForm({ ...eventForm, status: value })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="upcoming">Upcoming</SelectItem>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="start-date">Start Date *</Label>
               <Input
-                id="event-name"
-                value={eventForm.name}
-                onChange={(e) => setEventForm({ ...eventForm, name: e.target.value })}
-                placeholder="e.g., Leadership Assessment 2024"
+                id="start-date"
+                type="date"
+                value={eventForm.start_date}
+                onChange={(e) => setEventForm({ ...eventForm, start_date: e.target.value })}
               />
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="event-description">Description</Label>
-              <Textarea
-                id="event-description"
-                value={eventForm.description}
-                onChange={(e) => setEventForm({ ...eventForm, description: e.target.value })}
-                placeholder="Brief description of the event..."
-                rows={3}
+            <div className="space-y-2">
+              <Label htmlFor="end-date">End Date *</Label>
+              <Input
+                id="end-date"
+                type="date"
+                value={eventForm.end_date}
+                onChange={(e) => setEventForm({ ...eventForm, end_date: e.target.value })}
               />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="event-status">Status</Label>
-              <Select 
-                value={eventForm.status} 
-                onValueChange={(value: 'upcoming' | 'active' | 'completed') => 
-                  setEventForm({ ...eventForm, status: value })
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="upcoming">Upcoming</SelectItem>
-                  <SelectItem value="active">Active</SelectItem>
-                  <SelectItem value="completed">Completed</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="start-date">Start Date *</Label>
-                <Input
-                  id="start-date"
-                  type="date"
-                  value={eventForm.start_date}
-                  onChange={(e) => setEventForm({ ...eventForm, start_date: e.target.value })}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="end-date">End Date *</Label>
-                <Input
-                  id="end-date"
-                  type="date"
-                  value={eventForm.end_date}
-                  onChange={(e) => setEventForm({ ...eventForm, end_date: e.target.value })}
-                />
-              </div>
             </div>
           </div>
-          <DialogFooter>
+          <div className="flex justify-end gap-3 pt-4 border-t">
             <Button variant="outline" onClick={() => setShowEventModal(false)}>
               Cancel
             </Button>
@@ -1514,79 +1546,79 @@ export function AdminPanel() {
             >
               {editingEvent ? 'Update Event' : 'Create Event'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+        </div>
+      </Modal>
 
       {/* Candidate Modal */}
-      <Dialog open={showCandidateModal} onOpenChange={setShowCandidateModal}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
-            <DialogTitle>{editingCandidate ? 'Edit Candidate' : 'Add New Candidate'}</DialogTitle>
-            <DialogDescription>
-              {editingCandidate ? 'Update the candidate details below.' : 'Fill in the details for the new candidate.'}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            {!editingCandidate && (
-              <div className="grid gap-2">
-                <Label htmlFor="candidate-event">Event *</Label>
-                <Select 
-                  value={candidateForm.event_id} 
-                  onValueChange={(value) => setCandidateForm({ ...candidateForm, event_id: value })}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select an event" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {events.map(event => (
-                      <SelectItem key={event.id} value={event.id}>{event.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            <div className="grid gap-2">
-              <Label htmlFor="candidate-name">Name *</Label>
+      <Modal
+        isOpen={showCandidateModal}
+        onClose={() => {
+          setShowCandidateModal(false);
+          setEditingCandidate(null);
+        }}
+        title={editingCandidate ? 'Edit Candidate' : 'Add New Candidate'}
+        description={editingCandidate ? 'Update the candidate details below.' : 'Fill in the details for the new candidate.'}
+      >
+        <div className="space-y-4">
+          {!editingCandidate && (
+            <div className="space-y-2">
+              <Label htmlFor="candidate-event">Event *</Label>
+              <Select 
+                value={candidateForm.event_id} 
+                onValueChange={(value) => setCandidateForm({ ...candidateForm, event_id: value })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select an event" />
+                </SelectTrigger>
+                <SelectContent>
+                  {events.map(event => (
+                    <SelectItem key={event.id} value={event.id}>{event.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label htmlFor="candidate-name">Name *</Label>
+            <Input
+              id="candidate-name"
+              value={candidateForm.name}
+              onChange={(e) => setCandidateForm({ ...candidateForm, name: e.target.value })}
+              placeholder="Full name"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="candidate-email">Email</Label>
+            <Input
+              id="candidate-email"
+              type="email"
+              value={candidateForm.email}
+              onChange={(e) => setCandidateForm({ ...candidateForm, email: e.target.value })}
+              placeholder="email@example.com"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="candidate-department">Department</Label>
               <Input
-                id="candidate-name"
-                value={candidateForm.name}
-                onChange={(e) => setCandidateForm({ ...candidateForm, name: e.target.value })}
-                placeholder="Full name"
+                id="candidate-department"
+                value={candidateForm.department}
+                onChange={(e) => setCandidateForm({ ...candidateForm, department: e.target.value })}
+                placeholder="e.g., Engineering"
               />
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="candidate-email">Email</Label>
+            <div className="space-y-2">
+              <Label htmlFor="candidate-position">Position</Label>
               <Input
-                id="candidate-email"
-                type="email"
-                value={candidateForm.email}
-                onChange={(e) => setCandidateForm({ ...candidateForm, email: e.target.value })}
-                placeholder="email@example.com"
+                id="candidate-position"
+                value={candidateForm.position}
+                onChange={(e) => setCandidateForm({ ...candidateForm, position: e.target.value })}
+                placeholder="e.g., Senior Manager"
               />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="candidate-department">Department</Label>
-                <Input
-                  id="candidate-department"
-                  value={candidateForm.department}
-                  onChange={(e) => setCandidateForm({ ...candidateForm, department: e.target.value })}
-                  placeholder="e.g., Engineering"
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="candidate-position">Position</Label>
-                <Input
-                  id="candidate-position"
-                  value={candidateForm.position}
-                  onChange={(e) => setCandidateForm({ ...candidateForm, position: e.target.value })}
-                  placeholder="e.g., Senior Manager"
-                />
-              </div>
             </div>
           </div>
-          <DialogFooter>
+          <div className="flex justify-end gap-3 pt-4 border-t">
             <Button variant="outline" onClick={() => setShowCandidateModal(false)}>
               Cancel
             </Button>
@@ -1597,75 +1629,75 @@ export function AdminPanel() {
             >
               {editingCandidate ? 'Update Candidate' : 'Add Candidate'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+        </div>
+      </Modal>
 
       {/* Group/Team Modal */}
-      <Dialog open={showGroupModal} onOpenChange={setShowGroupModal}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
-            <DialogTitle>{editingGroup ? 'Edit Team' : 'Create New Team'}</DialogTitle>
-            <DialogDescription>
-              {editingGroup ? 'Update the team details below.' : 'Fill in the details for your new team.'}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            {!editingGroup && (
-              <div className="grid gap-2">
-                <Label htmlFor="group-event">Event *</Label>
-                <Select 
-                  value={groupForm.event_id} 
-                  onValueChange={(value) => setGroupForm({ ...groupForm, event_id: value })}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select an event" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {events.map(event => (
-                      <SelectItem key={event.id} value={event.id}>{event.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            <div className="grid gap-2">
-              <Label htmlFor="group-name">Team Name *</Label>
-              <Input
-                id="group-name"
-                value={groupForm.name}
-                onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })}
-                placeholder="e.g., Team Alpha"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="group-description">Description</Label>
-              <Textarea
-                id="group-description"
-                value={groupForm.description}
-                onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })}
-                placeholder="Brief description of the team..."
-                rows={3}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="group-case-study">Case Study</Label>
+      <Modal
+        isOpen={showGroupModal}
+        onClose={() => {
+          setShowGroupModal(false);
+          setEditingGroup(null);
+        }}
+        title={editingGroup ? 'Edit Team' : 'Create New Team'}
+        description={editingGroup ? 'Update the team details below.' : 'Fill in the details for your new team.'}
+      >
+        <div className="space-y-4">
+          {!editingGroup && (
+            <div className="space-y-2">
+              <Label htmlFor="group-event">Event *</Label>
               <Select 
-                value={groupForm.case_study} 
-                onValueChange={(value) => setGroupForm({ ...groupForm, case_study: value })}
+                value={groupForm.event_id} 
+                onValueChange={(value) => setGroupForm({ ...groupForm, event_id: value })}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select a case study" />
+                  <SelectValue placeholder="Select an event" />
                 </SelectTrigger>
                 <SelectContent>
-                  {caseStudies.map(cs => (
-                    <SelectItem key={cs.id} value={cs.name}>{cs.name}</SelectItem>
+                  {events.map(event => (
+                    <SelectItem key={event.id} value={event.id}>{event.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
+          )}
+          <div className="space-y-2">
+            <Label htmlFor="group-name">Team Name *</Label>
+            <Input
+              id="group-name"
+              value={groupForm.name}
+              onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })}
+              placeholder="e.g., Team Alpha"
+            />
           </div>
-          <DialogFooter>
+          <div className="space-y-2">
+            <Label htmlFor="group-description">Description</Label>
+            <Textarea
+              id="group-description"
+              value={groupForm.description}
+              onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })}
+              placeholder="Brief description of the team..."
+              rows={3}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="group-case-study">Case Study</Label>
+            <Select 
+              value={groupForm.case_study} 
+              onValueChange={(value) => setGroupForm({ ...groupForm, case_study: value })}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select a case study" />
+              </SelectTrigger>
+              <SelectContent>
+                {caseStudies.map(cs => (
+                  <SelectItem key={cs.id} value={cs.name}>{cs.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex justify-end gap-3 pt-4 border-t">
             <Button variant="outline" onClick={() => setShowGroupModal(false)}>
               Cancel
             </Button>
@@ -1676,41 +1708,41 @@ export function AdminPanel() {
             >
               {editingGroup ? 'Update Team' : 'Create Team'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+        </div>
+      </Modal>
 
       {/* Case Study Modal */}
-      <Dialog open={showCaseStudyModal} onOpenChange={setShowCaseStudyModal}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
-            <DialogTitle>{editingCaseStudy ? 'Edit Case Study' : 'Add New Case Study'}</DialogTitle>
-            <DialogDescription>
-              {editingCaseStudy ? 'Update the case study details below.' : 'Fill in the details for your new case study.'}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="cs-name">Name *</Label>
-              <Input
-                id="cs-name"
-                value={caseStudyForm.name}
-                onChange={(e) => setCaseStudyForm({ ...caseStudyForm, name: e.target.value })}
-                placeholder="e.g., Digital Transformation Challenge"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="cs-description">Description</Label>
-              <Textarea
-                id="cs-description"
-                value={caseStudyForm.description}
-                onChange={(e) => setCaseStudyForm({ ...caseStudyForm, description: e.target.value })}
-                placeholder="Describe the case study scenario and objectives..."
-                rows={4}
-              />
-            </div>
+      <Modal
+        isOpen={showCaseStudyModal}
+        onClose={() => {
+          setShowCaseStudyModal(false);
+          setEditingCaseStudy(null);
+        }}
+        title={editingCaseStudy ? 'Edit Case Study' : 'Add New Case Study'}
+        description={editingCaseStudy ? 'Update the case study details below.' : 'Fill in the details for your new case study.'}
+      >
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="cs-name">Name *</Label>
+            <Input
+              id="cs-name"
+              value={caseStudyForm.name}
+              onChange={(e) => setCaseStudyForm({ ...caseStudyForm, name: e.target.value })}
+              placeholder="e.g., Digital Transformation Challenge"
+            />
           </div>
-          <DialogFooter>
+          <div className="space-y-2">
+            <Label htmlFor="cs-description">Description</Label>
+            <Textarea
+              id="cs-description"
+              value={caseStudyForm.description}
+              onChange={(e) => setCaseStudyForm({ ...caseStudyForm, description: e.target.value })}
+              placeholder="Describe the case study scenario and objectives..."
+              rows={4}
+            />
+          </div>
+          <div className="flex justify-end gap-3 pt-4 border-t">
             <Button variant="outline" onClick={() => setShowCaseStudyModal(false)}>
               Cancel
             </Button>
@@ -1721,9 +1753,9 @@ export function AdminPanel() {
             >
               {editingCaseStudy ? 'Update Case Study' : 'Add Case Study'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
