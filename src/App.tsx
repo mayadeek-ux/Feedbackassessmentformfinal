@@ -48,11 +48,9 @@ interface Assignment {
   maxScore: number;
   caseStudy: string;
 
-  // IMPORTANT: keep ids so we can show correct analytics + group scoring.
   candidateId?: string | null;
   groupId?: string | null;
 
-  // Convenience display fields
   candidateName?: string;
   groupName?: string;
 
@@ -60,8 +58,8 @@ interface Assignment {
   lastUpdated?: Date;
   dueDate?: Date;
 
-  notes?: string; // assessor notes from assessment
-  scores?: Record<string, number>; // criteria scores from assessment
+  notes?: string;
+  scores?: Record<string, number>;
 }
 
 interface GroupData {
@@ -91,15 +89,13 @@ interface CandidateUI {
   timeSpent: number;
   caseStudy: string;
 
-  // keep extras your analytics/report UI expects
   redFlags: string[];
   submissionDate?: Date;
 
-  // NEW: store assessor notes so analytics summary can use it
   assessorNotes?: string;
 }
 
-// --- Criteria keys used by your analytics heatmap component
+// Canonical criteria keys
 const CRITERIA_KEYS = [
   "strategic-thinking",
   "leadership",
@@ -113,58 +109,127 @@ const CRITERIA_KEYS = [
   "digital-fluency",
 ] as const;
 
+type CriteriaKey = (typeof CRITERIA_KEYS)[number];
+
+const CRITERIA_CAMEL: Record<CriteriaKey, string> = {
+  "strategic-thinking": "strategicThinking",
+  leadership: "leadership",
+  communication: "communication",
+  innovation: "innovation",
+  "problem-solving": "problemSolving",
+  collaboration: "collaboration",
+  adaptability: "adaptability",
+  "decision-making": "decisionMaking",
+  "emotional-intelligence": "emotionalIntelligence",
+  "digital-fluency": "digitalFluency",
+};
+
+const CRITERIA_LABEL: Record<CriteriaKey, string> = {
+  "strategic-thinking": "Strategic Thinking",
+  leadership: "Leadership",
+  communication: "Communication",
+  innovation: "Innovation",
+  "problem-solving": "Problem Solving",
+  collaboration: "Collaboration",
+  adaptability: "Adaptability",
+  "decision-making": "Decision Making",
+  "emotional-intelligence": "Emotional Intelligence",
+  "digital-fluency": "Digital Fluency",
+};
+
 const emptyCriteriaScores = () =>
   CRITERIA_KEYS.reduce((acc, k) => {
     acc[k] = 0;
+    // Also store common alternative key formats so ANY component can read them.
+    acc[CRITERIA_CAMEL[k]] = 0;
+    acc[CRITERIA_LABEL[k]] = 0;
     return acc;
   }, {} as Record<string, number>);
-
-/**
- * Your scorer page might save `scores` with different keys depending on implementation.
- * This normalizes whatever comes back from Supabase into the exact keys the heatmap expects.
- */
-function normalizeScores(input: any): Record<string, number> {
-  const base = emptyCriteriaScores();
-  if (!input || typeof input !== "object") return base;
-
-  // Common aliases (add more if your scoring page uses different keys)
-  const aliases: Record<string, (typeof CRITERIA_KEYS)[number]> = {
-    strategicThinking: "strategic-thinking",
-    strategic_thinking: "strategic-thinking",
-    strategic: "strategic-thinking",
-
-    problemSolving: "problem-solving",
-    problem_solving: "problem-solving",
-
-    decisionMaking: "decision-making",
-    decision_making: "decision-making",
-
-    emotionalIntelligence: "emotional-intelligence",
-    emotional_intelligence: "emotional-intelligence",
-
-    digitalFluency: "digital-fluency",
-    digital_fluency: "digital-fluency",
-  };
-
-  for (const [rawKey, rawVal] of Object.entries(input)) {
-    const key =
-      (CRITERIA_KEYS as readonly string[]).includes(rawKey)
-        ? (rawKey as (typeof CRITERIA_KEYS)[number])
-        : aliases[rawKey];
-
-    if (!key) continue;
-
-    const num = typeof rawVal === "number" ? rawVal : Number(rawVal);
-    base[key] = Number.isFinite(num) ? num : 0;
-  }
-
-  return base;
-}
 
 function safeDate(v: any): Date | undefined {
   if (!v) return undefined;
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? undefined : d;
+}
+
+/**
+ * Normalizes *whatever* comes back from Supabase into a unified object that contains:
+ * - kebab-case keys (strategic-thinking)
+ * - camelCase keys (strategicThinking)
+ * - label keys (Strategic Thinking)
+ *
+ * This makes your heatmap work even if CandidateAnalytics expects a different format.
+ */
+function normalizeScores(input: any): Record<string, number> {
+  const out = emptyCriteriaScores();
+  if (!input || typeof input !== "object") return out;
+
+  const aliasesToCanonical: Record<string, CriteriaKey> = {
+    // Strategic
+    strategicThinking: "strategic-thinking",
+    strategic_thinking: "strategic-thinking",
+    strategic: "strategic-thinking",
+    "Strategic Thinking": "strategic-thinking",
+    StrategicThinking: "strategic-thinking",
+
+    // Problem solving
+    problemSolving: "problem-solving",
+    problem_solving: "problem-solving",
+    problem: "problem-solving",
+    "Problem Solving": "problem-solving",
+    ProblemSolving: "problem-solving",
+
+    // Decision making
+    decisionMaking: "decision-making",
+    decision_making: "decision-making",
+    decision: "decision-making",
+    "Decision Making": "decision-making",
+    DecisionMaking: "decision-making",
+
+    // Emotional intelligence
+    emotionalIntelligence: "emotional-intelligence",
+    emotional_intelligence: "emotional-intelligence",
+    emotional: "emotional-intelligence",
+    "Emotional Intelligence": "emotional-intelligence",
+    EmotionalIntelligence: "emotional-intelligence",
+
+    // Digital fluency
+    digitalFluency: "digital-fluency",
+    digital_fluency: "digital-fluency",
+    digital: "digital-fluency",
+    "Digital Fluency": "digital-fluency",
+    DigitalFluency: "digital-fluency",
+  };
+
+  for (const [rawKey, rawVal] of Object.entries(input)) {
+    const keyStr = String(rawKey);
+
+    // Determine canonical key
+    let canonical: CriteriaKey | undefined;
+
+    if ((CRITERIA_KEYS as readonly string[]).includes(keyStr)) {
+      canonical = keyStr as CriteriaKey;
+    } else if (aliasesToCanonical[keyStr]) {
+      canonical = aliasesToCanonical[keyStr];
+    } else {
+      // Also try matching camel or label
+      const byCamel = Object.entries(CRITERIA_CAMEL).find(([, v]) => v === keyStr)?.[0];
+      const byLabel = Object.entries(CRITERIA_LABEL).find(([, v]) => v === keyStr)?.[0];
+      canonical = (byCamel || byLabel) as CriteriaKey | undefined;
+    }
+
+    if (!canonical) continue;
+
+    const num = typeof rawVal === "number" ? rawVal : Number(rawVal);
+    const v = Number.isFinite(num) ? num : 0;
+
+    // Write all formats
+    out[canonical] = v;
+    out[CRITERIA_CAMEL[canonical]] = v;
+    out[CRITERIA_LABEL[canonical]] = v;
+  }
+
+  return out;
 }
 
 export default function App() {
@@ -283,55 +348,6 @@ export default function App() {
   // =========================
   // DATA LOADING
   // =========================
-  const loadData = useCallback(async () => {
-    if (!appUser) return;
-
-    setIsLoadingData(true);
-    try {
-      // 1) Events
-      const { data: events, error: eventsError } = await supabase
-        .from("events")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (eventsError) {
-        console.error("Error loading events:", eventsError);
-        if (appUser.role === "admin") setShowInitDialog(true);
-        return;
-      }
-
-      setAvailableEvents(events || []);
-      const activeEvent = (events || []).find((e: any) => e.status === "active") || (events || [])[0];
-
-      if (activeEvent) {
-        setCurrentEvent(activeEvent);
-        await loadEventData(activeEvent.id);
-      } else if (appUser.role === "admin") {
-        setShowInitDialog(true);
-      }
-
-      // 2) Case studies
-      const { data: studies, error: studiesError } = await supabase
-        .from("case_studies")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (!studiesError) setCaseStudies(studies || []);
-    } catch (err) {
-      console.error("Error loading data:", err);
-      toast.error("Failed to load data. You may need to initialize the system.");
-      if (appUser.role === "admin") setShowInitDialog(true);
-    } finally {
-      setIsLoadingData(false);
-    }
-  }, [appUser]);
-
-  /**
-   * IMPORTANT FIX:
-   * - We now load candidates + groups + assignments + assessments
-   * - We merge assessment scores into candidate objects so analytics heatmap shows values
-   * - We also store assessment notes on the candidate (so summaries can consider assessor notes)
-   */
   const loadEventData = useCallback(
     async (eventId: string) => {
       if (!appUser) return;
@@ -425,46 +441,61 @@ export default function App() {
           };
         });
 
-        // --- Analytics merge:
-        // We want candidates to show the latest SUBMITTED assessment (across assessors or just current assessor?).
-        // If you want it across ALL assessors, remove the .eq('assessor_id', appUser.id) below.
-        const { data: submittedRows, error: submittedError } = await supabase
-          .from("assignments")
+        /**
+         * ✅ IMPORTANT: Pull submitted assessments reliably.
+         * We query `assessments` and join to `assignments` for event/type/candidate.
+         * This avoids “scores missing” issues that happen with some relationship setups.
+         */
+        const { data: submittedAssessments, error: submittedErr } = await supabase
+          .from("assessments")
           .select(
             `
             id,
-            type,
-            status,
-            case_study,
-            candidate_id,
-            assessor_id,
+            assignment_id,
+            scores,
+            notes,
+            total_score,
+            submitted,
+            submitted_at,
             updated_at,
-            assessments:assessments(*)
+            assignment:assignments(
+              id,
+              event_id,
+              type,
+              status,
+              case_study,
+              candidate_id,
+              updated_at
+            )
           `
           )
-          .eq("event_id", eventId)
-          .eq("type", "individual")
-          .eq("status", "submitted")
-          // ✅ change this line depending on desired analytics behavior:
-          // .eq("assessor_id", appUser.id);
+          .eq("submitted", true);
 
-        if (submittedError) console.error("Error loading submitted assessments:", submittedError);
+        if (submittedErr) console.error("Error loading submitted assessments:", submittedErr);
 
         const latestByCandidate = new Map<string, any>();
 
-        for (const row of submittedRows || []) {
-          const candidateId = row.candidate_id;
-          if (!candidateId) continue;
+        for (const a of submittedAssessments || []) {
+          const assignment = (a as any).assignment;
+          if (!assignment) continue;
 
-          const assessment = Array.isArray(row.assessments) ? row.assessments[0] : row.assessments;
-          if (!assessment) continue;
+          if (assignment.event_id !== eventId) continue;
+          if (assignment.type !== "individual") continue;
+          if (!assignment.candidate_id) continue;
 
-          const rowUpdated = new Date(row.updated_at || assessment.updated_at || assessment.submitted_at || 0).getTime();
-          const prev = latestByCandidate.get(candidateId);
-          const prevUpdated = prev?.__ts ?? -1;
+          const ts = new Date(
+            a.updated_at || a.submitted_at || assignment.updated_at || 0
+          ).getTime();
 
-          if (rowUpdated > prevUpdated) {
-            latestByCandidate.set(candidateId, { ...assessment, __ts: rowUpdated, __caseStudy: row.case_study });
+          const prev = latestByCandidate.get(assignment.candidate_id);
+          const prevTs = prev?.__ts ?? -1;
+
+          if (ts > prevTs) {
+            latestByCandidate.set(assignment.candidate_id, {
+              ...a,
+              __ts: ts,
+              __caseStudy: assignment.case_study,
+            });
           }
         }
 
@@ -472,13 +503,19 @@ export default function App() {
           const latest = latestByCandidate.get(c.id);
 
           if (!latest) {
-            // If not submitted, try to find an in-progress assignment for *this assessor* and show partial scores
             const inProg = transformedAssignments.find(
-              (a) => a.type === "individual" && a.candidateId === c.id && a.status !== "not_started"
+              (a) =>
+                a.type === "individual" &&
+                a.candidateId === c.id &&
+                a.status !== "not_started"
             );
 
             const status: CandidateStatus =
-              inProg?.status === "submitted" ? "completed" : inProg?.status === "in_progress" ? "in_progress" : "not_started";
+              inProg?.status === "submitted"
+                ? "completed"
+                : inProg?.status === "in_progress"
+                ? "in_progress"
+                : "not_started";
 
             return {
               ...c,
@@ -490,7 +527,11 @@ export default function App() {
             };
           }
 
-          const total = typeof latest.total_score === "number" ? latest.total_score : Number(latest.total_score) || 0;
+          const total =
+            typeof latest.total_score === "number"
+              ? latest.total_score
+              : Number(latest.total_score) || 0;
+
           const scores = normalizeScores(latest.scores);
           const notes = latest.notes ?? "";
 
@@ -516,7 +557,50 @@ export default function App() {
     [appUser]
   );
 
-  // Load data when authenticated
+  const loadData = useCallback(async () => {
+    if (!appUser) return;
+
+    setIsLoadingData(true);
+    try {
+      // Events
+      const { data: events, error: eventsError } = await supabase
+        .from("events")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (eventsError) {
+        console.error("Error loading events:", eventsError);
+        if (appUser.role === "admin") setShowInitDialog(true);
+        return;
+      }
+
+      setAvailableEvents(events || []);
+      const activeEvent =
+        (events || []).find((e: any) => e.status === "active") || (events || [])[0];
+
+      if (activeEvent) {
+        setCurrentEvent(activeEvent);
+        await loadEventData(activeEvent.id);
+      } else if (appUser.role === "admin") {
+        setShowInitDialog(true);
+      }
+
+      // Case studies
+      const { data: studies, error: studiesError } = await supabase
+        .from("case_studies")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (!studiesError) setCaseStudies(studies || []);
+    } catch (err) {
+      console.error("Error loading data:", err);
+      toast.error("Failed to load data. You may need to initialize the system.");
+      if (appUser.role === "admin") setShowInitDialog(true);
+    } finally {
+      setIsLoadingData(false);
+    }
+  }, [appUser, loadEventData]);
+
   useEffect(() => {
     if (!appUser) return;
     loadData();
@@ -631,153 +715,117 @@ export default function App() {
   );
 
   // =========================
-  // SAVE / SUBMIT / REOPEN (Supabase)
+  // SAVE / SUBMIT / REOPEN
   // =========================
-  const upsertAssessment = useCallback(async (payload: any, submitted: boolean) => {
-    // payload expected from your scoring pages:
-    // { assignmentId, totalScore, performanceBand, notes, scores }
-    const assignmentId = payload.assignmentId;
-    if (!assignmentId) throw new Error("Missing assignmentId");
+  const upsertAssessment = useCallback(
+    async (payload: any, submitted: boolean) => {
+      const assignmentId = payload.assignmentId;
+      if (!assignmentId) throw new Error("Missing assignmentId");
 
-    const scores = payload.scores || {};
-    const normalizedScores = normalizeScores(scores);
+      const normalizedScores = normalizeScores(payload.scores || {});
 
-    // Check existing
-    const { data: existing, error: existingErr } = await supabase
-      .from("assessments")
-      .select("id")
-      .eq("assignment_id", assignmentId)
-      .maybeSingle();
+      const { data: existing, error: existingErr } = await supabase
+        .from("assessments")
+        .select("id")
+        .eq("assignment_id", assignmentId)
+        .maybeSingle();
 
-    if (existingErr) {
-      console.error("Error checking existing assessment:", existingErr);
-      throw existingErr;
-    }
+      if (existingErr) throw existingErr;
 
-    const assessmentRow = {
-      assignment_id: assignmentId,
-      scores: normalizedScores,
-      notes: payload.notes || "",
-      total_score: payload.totalScore || 0,
-      performance_band: payload.performanceBand || "",
-      submitted,
-      submitted_at: submitted ? new Date().toISOString() : null,
-      updated_at: new Date().toISOString(),
-    };
+      const assessmentRow = {
+        assignment_id: assignmentId,
+        scores: normalizedScores,
+        notes: payload.notes || "",
+        total_score: payload.totalScore || 0,
+        performance_band: payload.performanceBand || "",
+        submitted,
+        submitted_at: submitted ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+      };
 
-    if (existing?.id) {
-      const { error } = await supabase.from("assessments").update(assessmentRow).eq("assignment_id", assignmentId);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from("assessments").insert(assessmentRow);
-      if (error) throw error;
-    }
+      if (existing?.id) {
+        const { error } = await supabase.from("assessments").update(assessmentRow).eq("assignment_id", assignmentId);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("assessments").insert(assessmentRow);
+        if (error) throw error;
+      }
 
-    // Update assignment status
-    const nextStatus: AssignmentStatus = submitted ? "submitted" : "in_progress";
-    const { error: aErr } = await supabase
-      .from("assignments")
-      .update({ status: nextStatus, updated_at: new Date().toISOString() })
-      .eq("id", assignmentId);
+      const nextStatus: AssignmentStatus = submitted ? "submitted" : "in_progress";
+      const { error: aErr } = await supabase
+        .from("assignments")
+        .update({ status: nextStatus, updated_at: new Date().toISOString() })
+        .eq("id", assignmentId);
 
-    if (aErr) throw aErr;
+      if (aErr) throw aErr;
 
-    // Update local state
-    setAssignments((prev) =>
-      prev.map((a) =>
-        a.id === assignmentId
+      setAssignments((prev) =>
+        prev.map((a) =>
+          a.id === assignmentId
+            ? {
+                ...a,
+                status: nextStatus,
+                currentScore: payload.totalScore,
+                lastUpdated: new Date(),
+                notes: payload.notes || a.notes,
+                scores: normalizedScores,
+              }
+            : a
+        )
+      );
+
+      setCurrentAssignment((prev) =>
+        prev?.id === assignmentId
           ? {
-              ...a,
+              ...prev,
               status: nextStatus,
               currentScore: payload.totalScore,
               lastUpdated: new Date(),
-              notes: payload.notes || a.notes,
+              notes: payload.notes || prev.notes,
               scores: normalizedScores,
             }
-          : a
-      )
-    );
+          : prev
+      );
 
-    setCurrentAssignment((prev) =>
-      prev?.id === assignmentId
-        ? {
-            ...prev,
-            status: nextStatus,
-            currentScore: payload.totalScore,
-            lastUpdated: new Date(),
-            notes: payload.notes || prev.notes,
-            scores: normalizedScores,
-          }
-        : prev
-    );
+      if (currentEvent?.id) {
+        await loadEventData(currentEvent.id);
+      }
 
-    // 🔥 IMPORTANT: refresh event data so analytics immediately shows updated heatmap/values
-    if (currentEvent?.id) {
-      await loadEventData(currentEvent.id);
-    }
-
-    return true;
-  }, [currentEvent?.id, loadEventData]);
+      return true;
+    },
+    [currentEvent?.id, loadEventData]
+  );
 
   const handleSaveAssessment = useCallback(
     async (data: any) => {
-      try {
-        await upsertAssessment(data, false);
-        toast.success("Assessment saved successfully");
-        return true;
-      } catch (err) {
-        console.error("Error saving assessment:", err);
-        toast.error("Failed to save assessment");
-        throw err;
-      }
+      await upsertAssessment(data, false);
+      toast.success("Assessment saved successfully");
+      return true;
     },
     [upsertAssessment]
   );
 
   const handleSubmitAssessment = useCallback(
     async (data: any) => {
-      try {
-        await upsertAssessment(data, true);
-        toast.success("Assessment submitted successfully");
-        return true;
-      } catch (err) {
-        console.error("Error submitting assessment:", err);
-        toast.error("Failed to submit assessment");
-        throw err;
-      }
+      await upsertAssessment(data, true);
+      toast.success("Assessment submitted successfully");
+      return true;
     },
     [upsertAssessment]
   );
 
   const handleReopenAssessment = useCallback(
     async (assignmentId: string) => {
-      try {
-        await supabase
-          .from("assignments")
-          .update({ status: "in_progress", updated_at: new Date().toISOString() })
-          .eq("id", assignmentId);
+      await supabase.from("assignments").update({ status: "in_progress", updated_at: new Date().toISOString() }).eq("id", assignmentId);
+      await supabase.from("assessments").update({ submitted: false, updated_at: new Date().toISOString(), submitted_at: null }).eq("assignment_id", assignmentId);
 
-        await supabase
-          .from("assessments")
-          .update({ submitted: false, updated_at: new Date().toISOString(), submitted_at: null })
-          .eq("assignment_id", assignmentId);
+      setAssignments((prev) => prev.map((a) => (a.id === assignmentId ? { ...a, status: "in_progress", lastUpdated: new Date() } : a)));
+      setCurrentAssignment((prev) => (prev?.id === assignmentId ? { ...prev, status: "in_progress", lastUpdated: new Date() } : prev));
 
-        setAssignments((prev) =>
-          prev.map((a) => (a.id === assignmentId ? { ...a, status: "in_progress", lastUpdated: new Date() } : a))
-        );
-        setCurrentAssignment((prev) =>
-          prev?.id === assignmentId ? { ...prev, status: "in_progress", lastUpdated: new Date() } : prev
-        );
+      if (currentEvent?.id) await loadEventData(currentEvent.id);
 
-        if (currentEvent?.id) await loadEventData(currentEvent.id);
-
-        toast.success("Assessment reopened for editing");
-        return true;
-      } catch (err) {
-        console.error("Error reopening assessment:", err);
-        toast.error("Failed to reopen assessment");
-        throw err;
-      }
+      toast.success("Assessment reopened for editing");
+      return true;
     },
     [currentEvent?.id, loadEventData]
   );
@@ -811,7 +859,6 @@ export default function App() {
           email: candidate.email || "",
           department: candidate.department || "",
           position: candidate.position || "",
-
           overallScore: 0,
           criteriaScores: emptyCriteriaScores(),
           status: "not_started",
@@ -1182,13 +1229,7 @@ export default function App() {
   }
 
   if (!user || !appUser || isSignedOut) {
-    return (
-      <LoginForm
-        onSignIn={() => {
-          setIsSignedOut(false);
-        }}
-      />
-    );
+    return <LoginForm onSignIn={() => setIsSignedOut(false)} />;
   }
 
   return (
@@ -1199,7 +1240,7 @@ export default function App() {
         availableEvents={availableEvents}
         isOnline={isOnline}
         onEventChange={handleEventChange}
-        onShowHelp={handleShowHelp}
+        onShowHelp={() => setShowHelp(true)}
         onSignOut={handleSignOut}
       />
 
@@ -1312,7 +1353,10 @@ export default function App() {
 
         {currentView === "individual-scoring" && currentAssignment && (
           <IndividualScoringPage
-            candidateId={currentAssignment.candidateId || candidates.find((c) => c.name === currentAssignment.candidateName)?.id}
+            candidateId={
+              currentAssignment.candidateId ||
+              candidates.find((c) => c.name === currentAssignment.candidateName)?.id
+            }
             candidateName={currentAssignment.candidateName || "Candidate"}
             assignmentId={currentAssignment.id}
             caseStudy={currentAssignment.caseStudy}
@@ -1343,14 +1387,7 @@ export default function App() {
 
         {currentView === "analytics" && (
           <CandidateAnalytics
-            // ✅ candidates now carry real scores + notes from latest submitted assessment
-            candidates={candidates.map((c) => ({
-              ...c,
-              // CandidateAnalytics expects Date object sometimes; we already store Date
-              submissionDate: c.submissionDate,
-              // If your analytics wants to consider notes, it can read:
-              // (candidate as any).assessorNotes
-            }))}
+            candidates={candidates}
             onAddCandidate={() => setShowAddCandidate(true)}
             onBackToDashboard={handleBackToDashboard}
           />
