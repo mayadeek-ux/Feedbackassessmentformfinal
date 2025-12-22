@@ -1,36 +1,42 @@
 // src/lib/api.ts
+import { projectId, publicAnonKey } from "../utils/supabase/info";
 import { supabase } from "./supabase";
 
-/**
- * Wrapper around Supabase Edge Function "make-server"
- * Uses supabase.functions.invoke so:
- * - apikey is sent automatically
- * - Authorization is sent automatically if user is logged in
- * - no manual fetch, no CORS headaches
- */
-const invoke = async <T = any>(
-  path: string,
-  opts: {
-    method?: "GET" | "POST" | "PUT" | "DELETE";
-    body?: any;
-  } = {}
-): Promise<T> => {
-  const method = opts.method ?? "GET";
+const API_BASE = `https://${projectId}.supabase.co/functions/v1/make-server`;
 
-  // IMPORTANT: "path" here is for Hono routes inside the function
-  // We pass it via the invoke options.
-  const { data, error } = await supabase.functions.invoke("make-server", {
-    method,
-    path,
-    body: opts.body,
-  } as any);
+// Get JWT if logged in, otherwise return null (DO NOT use anon key as Bearer)
+const getJwt = async (): Promise<string | null> => {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
+};
 
-  if (error) {
-    // Supabase returns a FunctionsHttpError sometimes
-    throw new Error(error.message || "Edge function request failed");
+// Helper for API calls
+const apiCall = async (endpoint: string, options: RequestInit = {}) => {
+  const jwt = await getJwt();
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    // Supabase Edge Functions require apikey header for browser calls
+    apikey: publicAnonKey,
+    ...(options.headers as Record<string, string>),
+  };
+
+  // Only attach Authorization if we have a real JWT
+  if (jwt) {
+    headers.Authorization = `Bearer ${jwt}`;
   }
 
-  return data as T;
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: "Request failed" }));
+    throw new Error(err.error || `API call failed: ${response.status} ${response.statusText}`);
+  }
+
+  return response.json();
 };
 
 // ==================== EVENT API ====================
@@ -41,16 +47,26 @@ export const eventAPI = {
     status?: "upcoming" | "active" | "completed";
     start_date: string;
     end_date: string;
-  }) => invoke("/events", { method: "POST", body: eventData }),
+  }) =>
+    apiCall("/events", {
+      method: "POST",
+      body: JSON.stringify(eventData),
+    }),
 
-  getAll: () => invoke("/events"),
+  getAll: () => apiCall("/events"),
 
-  getById: (id: string) => invoke(`/events/${id}`),
+  getById: (id: string) => apiCall(`/events/${id}`),
 
   update: (id: string, updates: any) =>
-    invoke(`/events/${id}`, { method: "PUT", body: updates }),
+    apiCall(`/events/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    }),
 
-  delete: (id: string) => invoke(`/events/${id}`, { method: "DELETE" }),
+  delete: (id: string) =>
+    apiCall(`/events/${id}`, {
+      method: "DELETE",
+    }),
 };
 
 // ==================== CANDIDATE API ====================
@@ -62,14 +78,24 @@ export const candidateAPI = {
     group_id?: string;
     department?: string;
     position?: string;
-  }) => invoke("/candidates", { method: "POST", body: candidateData }),
+  }) =>
+    apiCall("/candidates", {
+      method: "POST",
+      body: JSON.stringify(candidateData),
+    }),
 
-  getByEvent: (eventId: string) => invoke(`/events/${eventId}/candidates`),
+  getByEvent: (eventId: string) => apiCall(`/events/${eventId}/candidates`),
 
   update: (id: string, updates: any) =>
-    invoke(`/candidates/${id}`, { method: "PUT", body: updates }),
+    apiCall(`/candidates/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    }),
 
-  delete: (id: string) => invoke(`/candidates/${id}`, { method: "DELETE" }),
+  delete: (id: string) =>
+    apiCall(`/candidates/${id}`, {
+      method: "DELETE",
+    }),
 };
 
 // ==================== ASSIGNMENT API ====================
@@ -82,17 +108,27 @@ export const assignmentAPI = {
     type: "individual" | "group";
     case_study: string;
     due_date?: string;
-  }) => invoke("/assignments", { method: "POST", body: assignmentData }),
+  }) =>
+    apiCall("/assignments", {
+      method: "POST",
+      body: JSON.stringify(assignmentData),
+    }),
 
   getByAssessor: (eventId: string, assessorId: string) =>
-    invoke(`/events/${eventId}/assessor/${assessorId}/assignments`),
+    apiCall(`/events/${eventId}/assessor/${assessorId}/assignments`),
 
-  getByEvent: (eventId: string) => invoke(`/events/${eventId}/assignments`),
+  getByEvent: (eventId: string) => apiCall(`/events/${eventId}/assignments`),
 
   update: (id: string, updates: any) =>
-    invoke(`/assignments/${id}`, { method: "PUT", body: updates }),
+    apiCall(`/assignments/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    }),
 
-  delete: (id: string) => invoke(`/assignments/${id}`, { method: "DELETE" }),
+  delete: (id: string) =>
+    apiCall(`/assignments/${id}`, {
+      method: "DELETE",
+    }),
 };
 
 // ==================== ASSESSMENT API ====================
@@ -104,10 +140,13 @@ export const assessmentAPI = {
     total_score: number;
     performance_band: string;
     submitted?: boolean;
-  }) => invoke("/assessments", { method: "POST", body: assessmentData }),
+  }) =>
+    apiCall("/assessments", {
+      method: "POST",
+      body: JSON.stringify(assessmentData),
+    }),
 
-  getByAssignment: (assignmentId: string) =>
-    invoke(`/assessments/${assignmentId}`),
+  getByAssignment: (assignmentId: string) => apiCall(`/assessments/${assignmentId}`),
 };
 
 // ==================== GROUP API ====================
@@ -118,35 +157,57 @@ export const groupAPI = {
     description?: string;
     member_ids?: string[];
     case_study?: string;
-  }) => invoke("/groups", { method: "POST", body: groupData }),
+  }) =>
+    apiCall("/groups", {
+      method: "POST",
+      body: JSON.stringify(groupData),
+    }),
 
-  getByEvent: (eventId: string) => invoke(`/events/${eventId}/groups`),
+  getByEvent: (eventId: string) => apiCall(`/events/${eventId}/groups`),
 
   update: (id: string, updates: any) =>
-    invoke(`/groups/${id}`, { method: "PUT", body: updates }),
+    apiCall(`/groups/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    }),
 
-  delete: (id: string) => invoke(`/groups/${id}`, { method: "DELETE" }),
+  delete: (id: string) =>
+    apiCall(`/groups/${id}`, {
+      method: "DELETE",
+    }),
 };
 
 // ==================== CASE STUDY API ====================
 export const caseStudyAPI = {
   create: (caseStudyData: { name: string; description?: string }) =>
-    invoke("/casestudies", { method: "POST", body: caseStudyData }),
+    apiCall("/casestudies", {
+      method: "POST",
+      body: JSON.stringify(caseStudyData),
+    }),
 
-  getAll: () => invoke("/casestudies"),
+  getAll: () => apiCall("/casestudies"),
 
   update: (id: string, updates: any) =>
-    invoke(`/casestudies/${id}`, { method: "PUT", body: updates }),
+    apiCall(`/casestudies/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    }),
 
-  delete: (id: string) => invoke(`/casestudies/${id}`, { method: "DELETE" }),
+  delete: (id: string) =>
+    apiCall(`/casestudies/${id}`, {
+      method: "DELETE",
+    }),
 };
 
 // ==================== INIT API ====================
 export const initAPI = {
-  initDemo: () => invoke("/init-demo", { method: "POST" }),
+  initDemo: () =>
+    apiCall("/init-demo", {
+      method: "POST",
+    }),
 };
 
 // ==================== USER API ====================
 export const userAPI = {
-  getProfile: () => invoke("/auth/profile"),
+  getProfile: () => apiCall("/auth/profile"),
 };
