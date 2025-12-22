@@ -53,7 +53,7 @@ export interface Database {
         Row: {
           id: string;
           email: string;
-          role: 'judge' | 'admin';
+          role: 'assessor' | 'admin';
           name: string | null;
           created_at: string;
           updated_at: string;
@@ -108,7 +108,7 @@ export interface Database {
         Row: {
           id: string;
           event_id: string;
-          judge_id: string;
+          assessor_id: string;
           candidate_id: string | null;
           group_id: string | null;
           type: 'individual' | 'group';
