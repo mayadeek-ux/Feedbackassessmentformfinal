@@ -1,5 +1,10 @@
 // src/App.tsx
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import type { User } from "@supabase/supabase-js";
+import { toast } from "sonner";
+
+import { supabase } from "./lib/supabase";
+
 import { LoginForm } from "./components/auth/LoginForm";
 import { TopBar } from "./components/layout/TopBar";
 import { AssessorDashboard } from "./components/dashboard/AssessorDashboard";
@@ -13,9 +18,6 @@ import { CandidateGroupManager } from "./components/management/CandidateGroupMan
 import { AddCandidateModal } from "./components/modals/AddCandidateModal";
 import { QuickAssessmentLauncher } from "./components/assessment/QuickAssessmentLauncher";
 import { Toaster } from "./components/ui/sonner";
-import { supabase } from "./lib/supabase";
-import { toast } from "sonner";
-import type { User } from "@supabase/supabase-js";
 
 interface AppUser {
   id: string;
@@ -24,16 +26,44 @@ interface AppUser {
   name?: string;
 }
 
+type CandidateStatus = "not_started" | "in_progress" | "completed";
+type AssignmentStatus = "not_started" | "in_progress" | "submitted";
+
+interface CandidateState {
+  id: string;
+  name: string;
+  email: string;
+  department: string;
+  position: string;
+
+  overallScore: number;
+  criteriaScores: Record<string, number>;
+  status: CandidateStatus;
+
+  timeSpent: number; // minutes
+  caseStudy: string;
+
+  redFlags: string[];
+  submissionDate?: Date;
+}
+
 interface Assignment {
   id: string;
   type: "individual" | "group";
+
+  candidateId?: string;
   candidateName?: string;
+
+  groupId?: string;
   groupName?: string;
-  status: "not_started" | "in_progress" | "submitted";
+
+  status: AssignmentStatus;
   currentScore?: number;
   maxScore: number;
+
   lastUpdated?: Date;
   dueDate?: Date;
+
   caseStudy: string;
   notes?: string;
 }
@@ -60,14 +90,107 @@ type AppView =
   | "case-studies"
   | "new-assessment";
 
+// -----------------------
+// Analytics helpers
+// -----------------------
+const CRITERIA_KEYS = [
+  "strategic-thinking",
+  "leadership",
+  "communication",
+  "innovation",
+  "problem-solving",
+  "collaboration",
+  "adaptability",
+  "decision-making",
+  "emotional-intelligence",
+  "digital-fluency",
+] as const;
+
+const emptyCriteriaScores = (): Record<string, number> =>
+  CRITERIA_KEYS.reduce((acc, k) => {
+    acc[k] = 0;
+    return acc;
+  }, {} as Record<string, number>);
+
+const mergeCriteriaScores = (base: Record<string, number>, incoming: any) => {
+  const merged = { ...base };
+  if (!incoming || typeof incoming !== "object") return merged;
+  for (const key of CRITERIA_KEYS) {
+    const v = incoming[key];
+    if (typeof v === "number" && Number.isFinite(v)) merged[key] = v;
+    // allow strings like "7"
+    if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) merged[key] = Number(v);
+  }
+  return merged;
+};
+
+/**
+ * Extract criteriaScores from either:
+ * - scoring page payload (data.criteriaScores or data.scores)
+ * - assessment row (assessment.scores)
+ */
+const extractCriteriaScoresFromAny = (obj: any): Record<string, number> => {
+  const base = emptyCriteriaScores();
+  if (!obj) return base;
+
+  if (obj.criteriaScores && typeof obj.criteriaScores === "object") {
+    return mergeCriteriaScores(base, obj.criteriaScores);
+  }
+
+  if (obj.scores && typeof obj.scores === "object") {
+    // If scores are keyed by criteria ids
+    return mergeCriteriaScores(base, obj.scores);
+  }
+
+  return base;
+};
+
+const computeOverallScore = (obj: any, criteriaScores: Record<string, number>) => {
+  if (typeof obj?.totalScore === "number" && Number.isFinite(obj.totalScore)) return obj.totalScore;
+  if (typeof obj?.total_score === "number" && Number.isFinite(obj.total_score)) return obj.total_score;
+
+  // default: sum criteria (out of 100 if each criterion is out of 10)
+  return Object.values(criteriaScores).reduce((sum, n) => sum + (Number(n) || 0), 0);
+};
+
+const getBestAssessment = (assessments: any) => {
+  // Supabase can return [] or object depending on relationship shape.
+  const list = Array.isArray(assessments) ? assessments : assessments ? [assessments] : [];
+  if (list.length === 0) return null;
+
+  // Prefer submitted, then most recently updated
+  const submitted = list.filter((a) => a?.submitted === true);
+  const pool = submitted.length ? submitted : list;
+
+  pool.sort((a, b) => {
+    const ad = new Date(a?.updated_at || a?.submitted_at || 0).getTime();
+    const bd = new Date(b?.updated_at || b?.submitted_at || 0).getTime();
+    return bd - ad;
+  });
+
+  return pool[0] ?? null;
+};
+
+const safeDate = (v: any): Date | undefined => {
+  if (!v) return undefined;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? undefined : d;
+};
+
+// -----------------------
+// App
+// -----------------------
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [appUser, setAppUser] = useState<AppUser | null>(null);
+
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingData, setIsLoadingData] = useState(false);
+
   const [currentView, setCurrentView] = useState<AppView>("dashboard");
   const [currentAssignment, setCurrentAssignment] = useState<Assignment | null>(null);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [showHelp, setShowHelp] = useState(false);
   const [showAddCandidate, setShowAddCandidate] = useState(false);
   const [isSignedOut, setIsSignedOut] = useState(false);
@@ -76,25 +199,23 @@ export default function App() {
   // Data state
   const [groups, setGroups] = useState<GroupData[]>([]);
   const [deletedCandidates, setDeletedCandidates] = useState<any[]>([]);
-  const [candidates, setCandidates] = useState<any[]>([]);
+  const [candidates, setCandidates] = useState<CandidateState[]>([]);
   const [caseStudies, setCaseStudies] = useState<any[]>([]);
   const [currentEvent, setCurrentEvent] = useState<any>(null);
   const [availableEvents, setAvailableEvents] = useState<any[]>([]);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
 
-  // ---------- AUTH HELPERS ----------
-  // FIXED: Use session user data directly instead of calling Edge Function
+  // ---------- AUTH ----------
   const fetchAndSetProfile = useCallback(async (sessionUser: User) => {
-    const role = sessionUser.user_metadata?.role || 'assessor';
+    const role = sessionUser.user_metadata?.role || "assessor";
     setAppUser({
       id: sessionUser.id,
-      email: sessionUser.email ?? '',
-      role: role === 'admin' ? 'admin' : 'assessor',
-      name: sessionUser.user_metadata?.name || sessionUser.email?.split('@')[0],
+      email: sessionUser.email ?? "",
+      role: role === "admin" ? "admin" : "assessor",
+      name: sessionUser.user_metadata?.name || sessionUser.email?.split("@")[0],
     });
   }, []);
 
-  // Robust auth initialization + listener
   useEffect(() => {
     let isMounted = true;
 
@@ -104,7 +225,6 @@ export default function App() {
         if (error) throw error;
 
         const sessionUser = data.session?.user ?? null;
-
         if (!isMounted) return;
 
         if (sessionUser) {
@@ -129,7 +249,6 @@ export default function App() {
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_event, session) => {
       const sessionUser = session?.user ?? null;
-
       if (!isMounted) return;
 
       if (sessionUser) {
@@ -148,240 +267,7 @@ export default function App() {
     };
   }, [fetchAndSetProfile]);
 
-  // Load data when user is authenticated
-  useEffect(() => {
-    if (appUser) {
-      loadData();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appUser?.id]);
-
-  // FIXED: Load data directly from Supabase instead of Edge Functions
-  const loadData = async () => {
-    setIsLoadingData(true);
-    try {
-      // Load events directly from Supabase
-      const { data: events, error: eventsError } = await supabase
-        .from('events')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (eventsError) {
-        console.error('Error loading events:', eventsError);
-        // If no events table or error, show init dialog for admin
-        if (appUser?.role === 'admin') {
-          setShowInitDialog(true);
-        }
-        setIsLoadingData(false);
-        return;
-      }
-
-      setAvailableEvents(events || []);
-
-      const activeEvent = events?.find((e: any) => e.status === 'active') || events?.[0];
-      if (activeEvent) {
-        setCurrentEvent(activeEvent);
-        await loadEventData(activeEvent.id);
-      } else if (appUser?.role === 'admin') {
-        setShowInitDialog(true);
-      }
-
-      // Load case studies directly from Supabase
-      const { data: studies, error: studiesError } = await supabase
-        .from('case_studies')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (!studiesError) {
-        setCaseStudies(studies || []);
-      }
-    } catch (error) {
-      console.error("Error loading data:", error);
-      toast.error("Failed to load data. You may need to initialize the system.");
-      if (appUser?.role === 'admin') setShowInitDialog(true);
-    } finally {
-      setIsLoadingData(false);
-    }
-  };
-
-  // FIXED: Load event data directly from Supabase
-  const loadEventData = async (eventId: string) => {
-    try {
-      // Load candidates
-      const { data: cands, error: candsError } = await supabase
-        .from('candidates')
-        .select('*')
-        .eq('event_id', eventId);
-
-      if (candsError) {
-        console.error('Error loading candidates:', candsError);
-      }
-
-      const transformedCandidates = (cands || []).map((c: any) => ({
-        id: c.id,
-        name: c.name,
-        email: c.email || "",
-        department: c.department || "",
-        position: c.position || "",
-        overallScore: 0,
-        criteriaScores: {
-          "strategic-thinking": 0,
-          leadership: 0,
-          communication: 0,
-          innovation: 0,
-          "problem-solving": 0,
-          collaboration: 0,
-          adaptability: 0,
-          "decision-making": 0,
-          "emotional-intelligence": 0,
-          "digital-fluency": 0,
-        },
-        status: "not_started" as const,
-        timeSpent: 0,
-        caseStudy: "",
-        redFlags: [],
-        submissionDate: undefined,
-      }));
-
-      setCandidates(transformedCandidates);
-
-      // Load groups
-      const { data: grps, error: grpsError } = await supabase
-        .from('groups')
-        .select('*')
-        .eq('event_id', eventId);
-
-      if (grpsError) {
-        console.error('Error loading groups:', grpsError);
-      }
-
-      const transformedGroups = (grps || []).map((g: any) => ({
-        id: g.id,
-        name: g.name,
-        description: g.description || "",
-        memberIds: g.member_ids || [],
-        caseStudy: g.case_study || "",
-        status: (g.status || "active") as GroupData["status"],
-        createdDate: new Date(g.created_at),
-        targetScore: 0,
-        notes: "",
-      }));
-      setGroups(transformedGroups);
-
-      // Load assignments for current user
-      if (appUser) {
-        const { data: assigs, error: assigsError } = await supabase
-          .from('assignments')
-          .select(`
-            *,
-            candidate:candidates(*),
-            group:groups(*),
-            assessment:assessments(*)
-          `)
-          .eq('event_id', eventId)
-          .eq('assessor_id', appUser.id);
-
-        if (assigsError) {
-          console.error('Error loading assignments:', assigsError);
-        }
-
-        const transformedAssignments = (assigs || []).map((a: any) => ({
-          id: a.id,
-          type: a.type,
-          candidateName: a.candidate?.name,
-          groupName: a.group?.name,
-          status: a.status || 'not_started',
-          currentScore: a.assessment?.[0]?.total_score,
-          maxScore: 100,
-          lastUpdated: a.updated_at ? new Date(a.updated_at) : undefined,
-          dueDate: a.due_date ? new Date(a.due_date) : undefined,
-          caseStudy: a.case_study || '',
-          notes: a.assessment?.[0]?.notes,
-        }));
-
-        setAssignments(transformedAssignments);
-      }
-    } catch (error) {
-      console.error("Error loading event data:", error);
-      toast.error("Failed to load event data");
-    }
-  };
-
-  // FIXED: Initialize demo data directly via Supabase
-  const handleInitializeDemo = async () => {
-    try {
-      setIsLoadingData(true);
-      
-      // Create a demo event
-      const { data: event, error: eventError } = await supabase
-        .from('events')
-        .insert({
-          name: 'Demo Assessment Event',
-          description: 'A demo event for testing the assessment platform',
-          status: 'active',
-          start_date: new Date().toISOString(),
-          end_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-        })
-        .select()
-        .single();
-
-      if (eventError) {
-        console.error('Error creating demo event:', eventError);
-        toast.error('Failed to create demo event: ' + eventError.message);
-        return;
-      }
-
-      // Create demo candidates
-      const demoCandidates = [
-        { name: 'Alice Johnson', email: 'alice@example.com', department: 'Engineering', position: 'Senior Developer' },
-        { name: 'Bob Smith', email: 'bob@example.com', department: 'Marketing', position: 'Marketing Manager' },
-        { name: 'Carol Williams', email: 'carol@example.com', department: 'Sales', position: 'Sales Lead' },
-      ];
-
-      const { error: candsError } = await supabase
-        .from('candidates')
-        .insert(demoCandidates.map(c => ({ ...c, event_id: event.id })));
-
-      if (candsError) {
-        console.error('Error creating demo candidates:', candsError);
-      }
-
-      // Create demo case studies
-      const demoCaseStudies = [
-        { 
-          title: 'Strategic Leadership Challenge', 
-          description: 'Evaluate leadership and strategic thinking capabilities',
-          type: 'individual',
-          duration_minutes: 60,
-        },
-        { 
-          title: 'Team Collaboration Scenario', 
-          description: 'Assess teamwork and collaboration skills',
-          type: 'group',
-          duration_minutes: 90,
-        },
-      ];
-
-      const { error: csError } = await supabase
-        .from('case_studies')
-        .insert(demoCaseStudies);
-
-      if (csError) {
-        console.error('Error creating demo case studies:', csError);
-      }
-
-      toast.success("Demo data initialized successfully");
-      setShowInitDialog(false);
-      await loadData();
-    } catch (error) {
-      console.error("Error initializing demo:", error);
-      toast.error("Failed to initialize demo data");
-    } finally {
-      setIsLoadingData(false);
-    }
-  };
-
-  // Online/offline status monitoring
+  // ---------- ONLINE/OFFLINE ----------
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
@@ -402,215 +288,339 @@ export default function App() {
     };
   }, []);
 
+  // ---------- DATA LOADING ----------
+  const loadEventData = useCallback(
+    async (eventId: string) => {
+      try {
+        // 1) Load candidates
+        const { data: cands, error: candsError } = await supabase
+          .from("candidates")
+          .select("*")
+          .eq("event_id", eventId);
+
+        if (candsError) console.error("Error loading candidates:", candsError);
+
+        // 2) Load groups
+        const { data: grps, error: grpsError } = await supabase
+          .from("groups")
+          .select("*")
+          .eq("event_id", eventId);
+
+        if (grpsError) console.error("Error loading groups:", grpsError);
+
+        const transformedGroups: GroupData[] = (grps || []).map((g: any) => ({
+          id: g.id,
+          name: g.name,
+          description: g.description || "",
+          memberIds: g.member_ids || [],
+          caseStudy: g.case_study || "",
+          status: (g.status || "active") as GroupData["status"],
+          createdDate: new Date(g.created_at),
+          targetScore: g.targetScore ?? 0,
+          notes: g.notes ?? "",
+        }));
+        setGroups(transformedGroups);
+
+        // 3) Load ALL assignments for the event (used to hydrate candidate analytics)
+        //    We include assessments so we can compute scores/status on refresh.
+        const { data: allAssigs, error: allAssigsError } = await supabase
+          .from("assignments")
+          .select(
+            `
+            id,
+            type,
+            status,
+            case_study,
+            updated_at,
+            due_date,
+            assessor_id,
+            candidate_id,
+            group_id,
+            candidate:candidates(id,name,email,department,position),
+            group:groups(id,name,member_ids,case_study,description,status,created_at),
+            assessments:assessments(*)
+          `
+          )
+          .eq("event_id", eventId);
+
+        if (allAssigsError) console.error("Error loading event assignments:", allAssigsError);
+
+        // Build a map: candidateId -> best assessment + assignment info
+        const candidateHydration = new Map<
+          string,
+          {
+            status: CandidateStatus;
+            overallScore: number;
+            criteriaScores: Record<string, number>;
+            submissionDate?: Date;
+            timeSpent: number;
+            caseStudy: string;
+          }
+        >();
+
+        for (const a of allAssigs || []) {
+          if (a.type !== "individual" || !a.candidate_id) continue;
+
+          const best = getBestAssessment(a.assessments);
+          const criteriaScores = best ? extractCriteriaScoresFromAny(best) : emptyCriteriaScores();
+          const overall = best ? computeOverallScore(best, criteriaScores) : 0;
+
+          const isSubmitted = best?.submitted === true || a.status === "submitted";
+          const status: CandidateStatus = isSubmitted ? "completed" : a.status === "in_progress" ? "in_progress" : "not_started";
+
+          // keep the most recent / best record
+          const existing = candidateHydration.get(a.candidate_id);
+          const candidateUpdatedAt = new Date(a.updated_at || 0).getTime();
+          const existingUpdatedAt = existing ? new Date(existing.submissionDate || 0).getTime() : -1;
+
+          const record = {
+            status,
+            overallScore: overall,
+            criteriaScores,
+            submissionDate: safeDate(best?.submitted_at) || (isSubmitted ? safeDate(a.updated_at) : undefined),
+            timeSpent:
+              typeof best?.time_spent === "number"
+                ? best.time_spent
+                : typeof best?.timeSpent === "number"
+                ? best.timeSpent
+                : 0,
+            caseStudy: a.case_study || "",
+          };
+
+          if (!existing) {
+            candidateHydration.set(a.candidate_id, record);
+          } else {
+            // Prefer submitted over not submitted, otherwise prefer newer assignment update
+            const prefer =
+              (record.status === "completed" && existing.status !== "completed") ||
+              (record.status === existing.status && candidateUpdatedAt > existingUpdatedAt);
+            if (prefer) candidateHydration.set(a.candidate_id, record);
+          }
+        }
+
+        const transformedCandidates: CandidateState[] = (cands || []).map((c: any) => {
+          const hyd = candidateHydration.get(c.id);
+
+          return {
+            id: c.id,
+            name: c.name,
+            email: c.email || "",
+            department: c.department || "",
+            position: c.position || "",
+
+            overallScore: hyd?.overallScore ?? 0,
+            criteriaScores: hyd?.criteriaScores ?? emptyCriteriaScores(),
+            status: hyd?.status ?? "not_started",
+
+            timeSpent: hyd?.timeSpent ?? 0,
+            caseStudy: hyd?.caseStudy ?? "",
+
+            redFlags: (c.red_flags || c.redFlags || []) as string[],
+            submissionDate: hyd?.submissionDate,
+          };
+        });
+
+        setCandidates(transformedCandidates);
+
+        // 4) Load assignments for current assessor (dashboard)
+        if (appUser) {
+          const { data: myAssigs, error: myAssigsError } = await supabase
+            .from("assignments")
+            .select(
+              `
+              id,
+              type,
+              status,
+              case_study,
+              updated_at,
+              due_date,
+              candidate_id,
+              group_id,
+              candidate:candidates(id,name,email,department,position),
+              group:groups(id,name,member_ids),
+              assessments:assessments(*)
+            `
+            )
+            .eq("event_id", eventId)
+            .eq("assessor_id", appUser.id);
+
+          if (myAssigsError) console.error("Error loading assessor assignments:", myAssigsError);
+
+          const transformedAssignments: Assignment[] = (myAssigs || []).map((a: any) => {
+            const best = getBestAssessment(a.assessments);
+            const criteriaScores = best ? extractCriteriaScoresFromAny(best) : emptyCriteriaScores();
+            const total = best ? computeOverallScore(best, criteriaScores) : undefined;
+
+            return {
+              id: a.id,
+              type: a.type,
+              candidateId: a.candidate_id ?? undefined,
+              candidateName: a.candidate?.name,
+              groupId: a.group_id ?? undefined,
+              groupName: a.group?.name,
+              status: (a.status || "not_started") as AssignmentStatus,
+              currentScore: typeof total === "number" ? total : undefined,
+              maxScore: 100,
+              lastUpdated: safeDate(a.updated_at),
+              dueDate: safeDate(a.due_date),
+              caseStudy: a.case_study || "",
+              notes: best?.notes,
+            };
+          });
+
+          setAssignments(transformedAssignments);
+        } else {
+          setAssignments([]);
+        }
+      } catch (error) {
+        console.error("Error loading event data:", error);
+        toast.error("Failed to load event data");
+      }
+    },
+    [appUser]
+  );
+
+  const loadData = useCallback(async () => {
+    setIsLoadingData(true);
+    try {
+      // Load events
+      const { data: events, error: eventsError } = await supabase
+        .from("events")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (eventsError) {
+        console.error("Error loading events:", eventsError);
+        if (appUser?.role === "admin") setShowInitDialog(true);
+        return;
+      }
+
+      setAvailableEvents(events || []);
+
+      const activeEvent = (events || []).find((e: any) => e.status === "active") || (events || [])[0];
+
+      if (activeEvent) {
+        setCurrentEvent(activeEvent);
+        await loadEventData(activeEvent.id);
+      } else if (appUser?.role === "admin") {
+        setShowInitDialog(true);
+      }
+
+      // Load case studies
+      const { data: studies, error: studiesError } = await supabase
+        .from("case_studies")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (!studiesError) setCaseStudies(studies || []);
+      else console.error("Error loading case studies:", studiesError);
+    } catch (error) {
+      console.error("Error loading data:", error);
+      toast.error("Failed to load data. You may need to initialize the system.");
+      if (appUser?.role === "admin") setShowInitDialog(true);
+    } finally {
+      setIsLoadingData(false);
+    }
+  }, [appUser?.role, loadEventData]);
+
+  useEffect(() => {
+    if (appUser?.id) {
+      loadData();
+    }
+  }, [appUser?.id, loadData]);
+
+  // ---------- INIT DEMO ----------
+  const handleInitializeDemo = async () => {
+    try {
+      setIsLoadingData(true);
+
+      const { data: event, error: eventError } = await supabase
+        .from("events")
+        .insert({
+          name: "Demo Assessment Event",
+          description: "A demo event for testing the assessment platform",
+          status: "active",
+          start_date: new Date().toISOString(),
+          end_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .select()
+        .single();
+
+      if (eventError) {
+        console.error("Error creating demo event:", eventError);
+        toast.error("Failed to create demo event: " + eventError.message);
+        return;
+      }
+
+      const demoCandidates = [
+        { name: "Alice Johnson", email: "alice@example.com", department: "Engineering", position: "Senior Developer" },
+        { name: "Bob Smith", email: "bob@example.com", department: "Marketing", position: "Marketing Manager" },
+        { name: "Carol Williams", email: "carol@example.com", department: "Sales", position: "Sales Lead" },
+      ];
+
+      const { error: candsError } = await supabase
+        .from("candidates")
+        .insert(demoCandidates.map((c) => ({ ...c, event_id: event.id })));
+
+      if (candsError) console.error("Error creating demo candidates:", candsError);
+
+      // IMPORTANT: your schema might use "title" or "name". We insert both safely by trying one, then fallback.
+      const demoCaseStudies = [
+        {
+          title: "Strategic Leadership Challenge",
+          name: "Strategic Leadership Challenge",
+          description: "Evaluate leadership and strategic thinking capabilities",
+          type: "individual",
+          duration_minutes: 60,
+        },
+        {
+          title: "Team Collaboration Scenario",
+          name: "Team Collaboration Scenario",
+          description: "Assess teamwork and collaboration skills",
+          type: "group",
+          duration_minutes: 90,
+        },
+      ];
+
+      // Try inserting as-is; if schema rejects a column, admin can adjust in DB,
+      // but we also try a narrower insert automatically.
+      let csError: any = null;
+      const csInsert1 = await supabase.from("case_studies").insert(demoCaseStudies);
+      csError = csInsert1.error;
+
+      if (csError) {
+        console.warn("Case study insert attempt #1 failed, retrying with minimal fields:", csError);
+        const minimal = demoCaseStudies.map((cs) => ({
+          title: cs.title,
+          description: cs.description,
+          type: cs.type,
+          duration_minutes: cs.duration_minutes,
+        }));
+        const csInsert2 = await supabase.from("case_studies").insert(minimal);
+        if (csInsert2.error) console.error("Error creating demo case studies:", csInsert2.error);
+      }
+
+      toast.success("Demo data initialized successfully");
+      setShowInitDialog(false);
+      await loadData();
+    } catch (error) {
+      console.error("Error initializing demo:", error);
+      toast.error("Failed to initialize demo data");
+    } finally {
+      setIsLoadingData(false);
+    }
+  };
+
+  // ---------- NAV ----------
   const handleStartAssessment = (assignmentId: string) => {
     const assignment = assignments.find((a) => a.id === assignmentId);
-    if (assignment) {
-      setCurrentAssignment(assignment);
-      setCurrentView(assignment.type === "individual" ? "individual-scoring" : "group-scoring");
-    }
+    if (!assignment) return;
+
+    setCurrentAssignment(assignment);
+    setCurrentView(assignment.type === "individual" ? "individual-scoring" : "group-scoring");
   };
 
-  const handleResumeAssessment = (assignmentId: string) => {
-    handleStartAssessment(assignmentId);
-  };
-
-  // FIXED: Save assessment directly to Supabase
-  const handleSaveAssessment = async (data: any) => {
-    try {
-      // Check if assessment exists
-      const { data: existing } = await supabase
-        .from('assessments')
-        .select('id')
-        .eq('assignment_id', data.assignmentId)
-        .single();
-
-      if (existing) {
-        // Update existing
-        await supabase
-          .from('assessments')
-          .update({
-            scores: data.scores || {},
-            notes: data.notes || '',
-            total_score: data.totalScore || 0,
-            performance_band: data.performanceBand || '',
-            submitted: false,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('assignment_id', data.assignmentId);
-      } else {
-        // Create new
-        await supabase
-          .from('assessments')
-          .insert({
-            assignment_id: data.assignmentId,
-            scores: data.scores || {},
-            notes: data.notes || '',
-            total_score: data.totalScore || 0,
-            performance_band: data.performanceBand || '',
-            submitted: false,
-          });
-      }
-
-      // Update assignment status
-      await supabase
-        .from('assignments')
-        .update({ status: 'in_progress', updated_at: new Date().toISOString() })
-        .eq('id', data.assignmentId);
-
-      setAssignments((prev) =>
-        prev.map((assignment) =>
-          assignment.id === data.assignmentId
-            ? {
-                ...assignment,
-                status: "in_progress",
-                currentScore: data.totalScore,
-                lastUpdated: new Date(),
-                notes: data.notes || assignment.notes,
-              }
-            : assignment
-        )
-      );
-
-      if (currentAssignment?.id === data.assignmentId) {
-        setCurrentAssignment((prev) =>
-          prev
-            ? {
-                ...prev,
-                status: "in_progress",
-                currentScore: data.totalScore,
-                lastUpdated: new Date(),
-                notes: data.notes || prev.notes,
-              }
-            : null
-        );
-      }
-
-      toast.success("Assessment saved successfully");
-      return true;
-    } catch (error) {
-      console.error("Error saving assessment:", error);
-      toast.error("Failed to save assessment");
-      throw error;
-    }
-  };
-
-  // FIXED: Submit assessment directly to Supabase
-  const handleSubmitAssessment = async (data: any) => {
-    try {
-      // Check if assessment exists
-      const { data: existing } = await supabase
-        .from('assessments')
-        .select('id')
-        .eq('assignment_id', data.assignmentId)
-        .single();
-
-      if (existing) {
-        // Update existing
-        await supabase
-          .from('assessments')
-          .update({
-            scores: data.scores || {},
-            notes: data.notes || '',
-            total_score: data.totalScore || 0,
-            performance_band: data.performanceBand || '',
-            submitted: true,
-            submitted_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('assignment_id', data.assignmentId);
-      } else {
-        // Create new
-        await supabase
-          .from('assessments')
-          .insert({
-            assignment_id: data.assignmentId,
-            scores: data.scores || {},
-            notes: data.notes || '',
-            total_score: data.totalScore || 0,
-            performance_band: data.performanceBand || '',
-            submitted: true,
-            submitted_at: new Date().toISOString(),
-          });
-      }
-
-      // Update assignment status
-      await supabase
-        .from('assignments')
-        .update({ status: 'submitted', updated_at: new Date().toISOString() })
-        .eq('id', data.assignmentId);
-
-      setAssignments((prev) =>
-        prev.map((assignment) =>
-          assignment.id === data.assignmentId
-            ? {
-                ...assignment,
-                status: "submitted",
-                currentScore: data.totalScore,
-                lastUpdated: new Date(),
-                notes: data.notes || assignment.notes,
-              }
-            : assignment
-        )
-      );
-
-      if (currentAssignment?.id === data.assignmentId) {
-        setCurrentAssignment((prev) =>
-          prev
-            ? {
-                ...prev,
-                status: "submitted",
-                currentScore: data.totalScore,
-                lastUpdated: new Date(),
-                notes: data.notes || prev.notes,
-              }
-            : null
-        );
-      }
-
-      toast.success("Assessment submitted successfully");
-      return true;
-    } catch (error) {
-      console.error("Error submitting assessment:", error);
-      toast.error("Failed to submit assessment");
-      throw error;
-    }
-  };
-
-  // FIXED: Reopen assessment directly via Supabase
-  const handleReopenAssessment = async (assignmentId: string) => {
-    try {
-      await supabase
-        .from('assignments')
-        .update({ status: 'in_progress', updated_at: new Date().toISOString() })
-        .eq('id', assignmentId);
-
-      await supabase
-        .from('assessments')
-        .update({ submitted: false, updated_at: new Date().toISOString() })
-        .eq('assignment_id', assignmentId);
-
-      setAssignments((prev) =>
-        prev.map((assignment) =>
-          assignment.id === assignmentId
-            ? { ...assignment, status: "in_progress", lastUpdated: new Date() }
-            : assignment
-        )
-      );
-
-      if (currentAssignment?.id === assignmentId) {
-        setCurrentAssignment((prev) =>
-          prev ? { ...prev, status: "in_progress", lastUpdated: new Date() } : null
-        );
-      }
-
-      toast.success("Assessment reopened for editing");
-      return true;
-    } catch (error) {
-      console.error("Error reopening assessment:", error);
-      toast.error("Failed to reopen assessment");
-      throw error;
-    }
-  };
+  const handleResumeAssessment = (assignmentId: string) => handleStartAssessment(assignmentId);
 
   const handleBackToDashboard = () => {
     setCurrentView("dashboard");
@@ -619,11 +629,11 @@ export default function App() {
 
   const handleEventChange = async (eventId: string) => {
     const event = availableEvents.find((e) => e.id === eventId);
-    if (event) {
-      setCurrentEvent(event);
-      await loadEventData(eventId);
-      toast.success("Event switched successfully");
-    }
+    if (!event) return;
+
+    setCurrentEvent(event);
+    await loadEventData(eventId);
+    toast.success("Event switched successfully");
   };
 
   const handleShowHelp = () => setShowHelp(true);
@@ -643,7 +653,232 @@ export default function App() {
     }
   };
 
-  // FIXED: Add candidate directly via Supabase
+  // ---------- SAVE / SUBMIT / REOPEN ----------
+  const upsertAssessment = async (payload: {
+    assignmentId: string;
+    scores?: any;
+    criteriaScores?: any;
+    notes?: string;
+    totalScore?: number;
+    performanceBand?: string;
+    submitted: boolean;
+    submittedAt?: string;
+    timeSpent?: number;
+  }) => {
+    const criteriaScores = extractCriteriaScoresFromAny(payload);
+    const totalScore = computeOverallScore(payload, criteriaScores);
+
+    const scoresToStore = payload.scores && typeof payload.scores === "object" ? payload.scores : criteriaScores;
+
+    const { data: existing, error: existingError } = await supabase
+      .from("assessments")
+      .select("id")
+      .eq("assignment_id", payload.assignmentId)
+      .single();
+
+    // If "single()" fails because none exists, Supabase can return error; we treat that as "no record"
+    const hasExisting = !!existing?.id && !existingError;
+
+    if (hasExisting) {
+      const { error } = await supabase
+        .from("assessments")
+        .update({
+          scores: scoresToStore || {},
+          notes: payload.notes || "",
+          total_score: totalScore || 0,
+          performance_band: payload.performanceBand || "",
+          submitted: payload.submitted,
+          submitted_at: payload.submitted ? payload.submittedAt || new Date().toISOString() : null,
+          time_spent: typeof payload.timeSpent === "number" ? payload.timeSpent : null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("assignment_id", payload.assignmentId);
+
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from("assessments").insert({
+        assignment_id: payload.assignmentId,
+        scores: scoresToStore || {},
+        notes: payload.notes || "",
+        total_score: totalScore || 0,
+        performance_band: payload.performanceBand || "",
+        submitted: payload.submitted,
+        submitted_at: payload.submitted ? payload.submittedAt || new Date().toISOString() : null,
+        time_spent: typeof payload.timeSpent === "number" ? payload.timeSpent : null,
+      });
+
+      if (error) throw error;
+    }
+
+    return { criteriaScores, totalScore };
+  };
+
+  const handleSaveAssessment = async (data: any) => {
+    try {
+      if (!currentAssignment) throw new Error("No active assignment");
+
+      const { criteriaScores, totalScore } = await upsertAssessment({
+        assignmentId: data.assignmentId,
+        scores: data.scores,
+        criteriaScores: data.criteriaScores,
+        notes: data.notes,
+        totalScore: data.totalScore,
+        performanceBand: data.performanceBand,
+        submitted: false,
+        timeSpent: data.timeSpent,
+      });
+
+      await supabase
+        .from("assignments")
+        .update({ status: "in_progress", updated_at: new Date().toISOString() })
+        .eq("id", data.assignmentId);
+
+      // Update assignments state
+      setAssignments((prev) =>
+        prev.map((a) =>
+          a.id === data.assignmentId
+            ? { ...a, status: "in_progress", currentScore: totalScore, lastUpdated: new Date(), notes: data.notes || a.notes }
+            : a
+        )
+      );
+
+      // Update current assignment state
+      if (currentAssignment?.id === data.assignmentId) {
+        setCurrentAssignment((prev) =>
+          prev ? { ...prev, status: "in_progress", currentScore: totalScore, lastUpdated: new Date(), notes: data.notes || prev.notes } : null
+        );
+      }
+
+      // ✅ Update candidate analytics state (so dashboard analytics is never stuck at 0)
+      if (currentAssignment.type === "individual" && currentAssignment.candidateId) {
+        setCandidates((prev) =>
+          prev.map((c) =>
+            c.id === currentAssignment.candidateId
+              ? {
+                  ...c,
+                  overallScore: totalScore,
+                  criteriaScores,
+                  status: "in_progress",
+                  timeSpent: typeof data?.timeSpent === "number" ? data.timeSpent : c.timeSpent,
+                  caseStudy: currentAssignment.caseStudy || c.caseStudy,
+                }
+              : c
+          )
+        );
+      }
+
+      toast.success("Assessment saved successfully");
+      return true;
+    } catch (error) {
+      console.error("Error saving assessment:", error);
+      toast.error("Failed to save assessment");
+      throw error;
+    }
+  };
+
+  const handleSubmitAssessment = async (data: any) => {
+    try {
+      if (!currentAssignment) throw new Error("No active assignment");
+
+      const { criteriaScores, totalScore } = await upsertAssessment({
+        assignmentId: data.assignmentId,
+        scores: data.scores,
+        criteriaScores: data.criteriaScores,
+        notes: data.notes,
+        totalScore: data.totalScore,
+        performanceBand: data.performanceBand,
+        submitted: true,
+        submittedAt: new Date().toISOString(),
+        timeSpent: data.timeSpent,
+      });
+
+      await supabase
+        .from("assignments")
+        .update({ status: "submitted", updated_at: new Date().toISOString() })
+        .eq("id", data.assignmentId);
+
+      // Update assignments state
+      setAssignments((prev) =>
+        prev.map((a) =>
+          a.id === data.assignmentId
+            ? { ...a, status: "submitted", currentScore: totalScore, lastUpdated: new Date(), notes: data.notes || a.notes }
+            : a
+        )
+      );
+
+      // Update current assignment state
+      if (currentAssignment?.id === data.assignmentId) {
+        setCurrentAssignment((prev) =>
+          prev ? { ...prev, status: "submitted", currentScore: totalScore, lastUpdated: new Date(), notes: data.notes || prev.notes } : null
+        );
+      }
+
+      // ✅ Update candidate analytics state on submit
+      if (currentAssignment.type === "individual" && currentAssignment.candidateId) {
+        setCandidates((prev) =>
+          prev.map((c) =>
+            c.id === currentAssignment.candidateId
+              ? {
+                  ...c,
+                  overallScore: totalScore,
+                  criteriaScores,
+                  status: "completed",
+                  submissionDate: new Date(),
+                  timeSpent: typeof data?.timeSpent === "number" ? data.timeSpent : c.timeSpent,
+                  caseStudy: currentAssignment.caseStudy || c.caseStudy,
+                }
+              : c
+          )
+        );
+      }
+
+      toast.success("Assessment submitted successfully");
+      return true;
+    } catch (error) {
+      console.error("Error submitting assessment:", error);
+      toast.error("Failed to submit assessment");
+      throw error;
+    }
+  };
+
+  const handleReopenAssessment = async (assignmentId: string) => {
+    try {
+      await supabase
+        .from("assignments")
+        .update({ status: "in_progress", updated_at: new Date().toISOString() })
+        .eq("id", assignmentId);
+
+      await supabase
+        .from("assessments")
+        .update({ submitted: false, updated_at: new Date().toISOString() })
+        .eq("assignment_id", assignmentId);
+
+      setAssignments((prev) => prev.map((a) => (a.id === assignmentId ? { ...a, status: "in_progress", lastUpdated: new Date() } : a)));
+
+      if (currentAssignment?.id === assignmentId) {
+        setCurrentAssignment((prev) => (prev ? { ...prev, status: "in_progress", lastUpdated: new Date() } : null));
+      }
+
+      // If it's an individual assignment, reflect that in candidate status too
+      const reopened = assignments.find((a) => a.id === assignmentId);
+      if (reopened?.type === "individual" && reopened?.candidateId) {
+        setCandidates((prev) =>
+          prev.map((c) =>
+            c.id === reopened.candidateId ? { ...c, status: "in_progress", submissionDate: undefined } : c
+          )
+        );
+      }
+
+      toast.success("Assessment reopened for editing");
+      return true;
+    } catch (error) {
+      console.error("Error reopening assessment:", error);
+      toast.error("Failed to reopen assessment");
+      throw error;
+    }
+  };
+
+  // ---------- CANDIDATES ----------
   const handleAddCandidate = async (candidateData: any) => {
     if (!currentEvent) {
       toast.error("No active event");
@@ -652,42 +887,34 @@ export default function App() {
 
     try {
       const { data: candidate, error } = await supabase
-        .from('candidates')
+        .from("candidates")
         .insert({
           event_id: currentEvent.id,
           name: candidateData.name,
-          email: candidateData.email || '',
-          department: candidateData.department || '',
-          position: candidateData.position || '',
+          email: candidateData.email || "",
+          department: candidateData.department || "",
+          position: candidateData.position || "",
         })
         .select()
         .single();
 
       if (error) throw error;
 
-      const newCandidate = {
+      const newCandidate: CandidateState = {
         id: candidate.id,
         name: candidate.name,
-        overallScore: 0,
-        criteriaScores: {
-          "strategic-thinking": 0,
-          leadership: 0,
-          communication: 0,
-          innovation: 0,
-          "problem-solving": 0,
-          collaboration: 0,
-          adaptability: 0,
-          "decision-making": 0,
-          "emotional-intelligence": 0,
-          "digital-fluency": 0,
-        },
-        status: "not_started" as const,
-        timeSpent: 0,
-        caseStudy: candidateData.caseStudy || "Strategic Leadership Challenge",
-        redFlags: [],
         email: candidate.email || "",
         department: candidate.department || "",
         position: candidate.position || "",
+
+        overallScore: 0,
+        criteriaScores: emptyCriteriaScores(),
+        status: "not_started",
+
+        timeSpent: 0,
+        caseStudy: candidateData.caseStudy || "",
+
+        redFlags: [],
         submissionDate: undefined,
       };
 
@@ -699,17 +926,21 @@ export default function App() {
     }
   };
 
-  // FIXED: Update candidate directly via Supabase
   const handleUpdateCandidate = async (id: string, candidateData: any) => {
     try {
-      const { error } = await supabase
-        .from('candidates')
-        .update(candidateData)
-        .eq('id', id);
-
+      const { error } = await supabase.from("candidates").update(candidateData).eq("id", id);
       if (error) throw error;
 
-      setCandidates((prev) => prev.map((c: any) => (c.id === id ? { ...c, ...candidateData } : c)));
+      setCandidates((prev) =>
+        prev.map((c) =>
+          c.id === id
+            ? {
+                ...c,
+                ...candidateData,
+              }
+            : c
+        )
+      );
       toast.success("Candidate updated successfully");
     } catch (error) {
       console.error("Error updating candidate:", error);
@@ -717,32 +948,17 @@ export default function App() {
     }
   };
 
-  // FIXED: Delete candidate directly via Supabase
   const handleDeleteCandidate = async (id: string) => {
     try {
-      const candidateToDelete = candidates.find((c: any) => c.id === id);
+      const candidateToDelete = candidates.find((c) => c.id === id);
       if (!candidateToDelete) return;
 
-      const { error } = await supabase
-        .from('candidates')
-        .delete()
-        .eq('id', id);
-
+      const { error } = await supabase.from("candidates").delete().eq("id", id);
       if (error) throw error;
 
-      setDeletedCandidates((prev) => [
-        ...prev,
-        { ...candidateToDelete, deletedAt: new Date(), originalId: id },
-      ]);
-
-      setCandidates((prev) => prev.filter((c: any) => c.id !== id));
-
-      setGroups((prev) =>
-        prev.map((group) => ({
-          ...group,
-          memberIds: group.memberIds.filter((memberId) => memberId !== id),
-        }))
-      );
+      setDeletedCandidates((prev) => [...prev, { ...candidateToDelete, deletedAt: new Date(), originalId: id }]);
+      setCandidates((prev) => prev.filter((c) => c.id !== id));
+      setGroups((prev) => prev.map((g) => ({ ...g, memberIds: g.memberIds.filter((mid) => mid !== id) })));
 
       toast.success("Candidate deleted");
     } catch (error) {
@@ -766,7 +982,7 @@ export default function App() {
     toast.success("Candidate permanently deleted");
   };
 
-  // FIXED: Add group directly via Supabase
+  // ---------- GROUPS ----------
   const handleAddGroup = async (groupData: any) => {
     if (!currentEvent) {
       toast.error("No active event");
@@ -775,13 +991,13 @@ export default function App() {
 
     try {
       const { data: group, error } = await supabase
-        .from('groups')
+        .from("groups")
         .insert({
           event_id: currentEvent.id,
           name: groupData.name,
-          description: groupData.description || '',
+          description: groupData.description || "",
           member_ids: groupData.memberIds || [],
-          case_study: groupData.caseStudy || '',
+          case_study: groupData.caseStudy || "",
         })
         .select()
         .single();
@@ -808,18 +1024,17 @@ export default function App() {
     }
   };
 
-  // FIXED: Update group directly via Supabase
   const handleUpdateGroup = async (id: string, groupData: any) => {
     try {
       const { error } = await supabase
-        .from('groups')
+        .from("groups")
         .update({
           name: groupData.name,
           description: groupData.description,
           member_ids: groupData.memberIds,
           case_study: groupData.caseStudy,
         })
-        .eq('id', id);
+        .eq("id", id);
 
       if (error) throw error;
 
@@ -831,14 +1046,9 @@ export default function App() {
     }
   };
 
-  // FIXED: Delete group directly via Supabase
   const handleDeleteGroup = async (id: string) => {
     try {
-      const { error } = await supabase
-        .from('groups')
-        .delete()
-        .eq('id', id);
-
+      const { error } = await supabase.from("groups").delete().eq("id", id);
       if (error) throw error;
 
       setGroups((prev) => prev.filter((g) => g.id !== id));
@@ -849,22 +1059,29 @@ export default function App() {
     }
   };
 
-  const handleViewAnalytics = () => setCurrentView("analytics");
-  const handleViewManagement = () => setCurrentView("management");
-
-  
+  // ---------- CASE STUDIES ----------
   const handleUpdateCaseStudy = async (id: string, updates: any) => {
-  try {
-    // Only send fields that exist in the database
-    const { error } = await supabase
-      .from('case_studies')
-      .update({
-        name: updates.name,
-        description: updates.description
-      })
-      .eq('id', id);
+    try {
+      // Your project has mixed usage (name vs title). We try name first, then title.
+      const attempt1 = await supabase
+        .from("case_studies")
+        .update({
+          name: updates.name ?? updates.title,
+          description: updates.description,
+        })
+        .eq("id", id);
 
-    if (error) throw error;
+      if (attempt1.error) {
+        const attempt2 = await supabase
+          .from("case_studies")
+          .update({
+            title: updates.title ?? updates.name,
+            description: updates.description,
+          })
+          .eq("id", id);
+
+        if (attempt2.error) throw attempt2.error;
+      }
 
       setCaseStudies((prev) => prev.map((cs: any) => (cs.id === id ? { ...cs, ...updates } : cs)));
       toast.success("Case study updated successfully");
@@ -874,15 +1091,9 @@ export default function App() {
     }
   };
 
-  // FIXED: Add case study directly via Supabase
   const handleAddCaseStudy = async (caseStudyData: any) => {
     try {
-      const { data: caseStudy, error } = await supabase
-        .from('case_studies')
-        .insert(caseStudyData)
-        .select()
-        .single();
-
+      const { data: caseStudy, error } = await supabase.from("case_studies").insert(caseStudyData).select().single();
       if (error) throw error;
 
       setCaseStudies((prev) => [...prev, caseStudy]);
@@ -893,14 +1104,9 @@ export default function App() {
     }
   };
 
-  // FIXED: Delete case study directly via Supabase
   const handleDeleteCaseStudy = async (id: string) => {
     try {
-      const { error } = await supabase
-        .from('case_studies')
-        .delete()
-        .eq('id', id);
-
+      const { error } = await supabase.from("case_studies").delete().eq("id", id);
       if (error) throw error;
 
       setCaseStudies((prev) => prev.filter((cs: any) => cs.id !== id));
@@ -911,29 +1117,25 @@ export default function App() {
     }
   };
 
-  // FIXED: Start individual assessment directly via Supabase
-  const handleStartIndividualAssessment = async (
-    candidateName: string,
-    caseStudy: string,
-    isNewCandidate: boolean
-  ) => {
+  // ---------- START NEW ASSESSMENTS ----------
+  const handleStartIndividualAssessment = async (candidateName: string, caseStudy: string, isNewCandidate: boolean) => {
     if (!currentEvent || !appUser) {
       toast.error("No active event or user");
       return;
     }
 
-    let candidateId = candidates.find((c: any) => c.name === candidateName)?.id;
+    let candidateId = candidates.find((c) => c.name === candidateName)?.id;
 
     if (isNewCandidate) {
       try {
         const { data: candidate, error } = await supabase
-          .from('candidates')
+          .from("candidates")
           .insert({
             event_id: currentEvent.id,
             name: candidateName,
-            email: '',
-            department: '',
-            position: '',
+            email: "",
+            department: "",
+            position: "",
           })
           .select()
           .single();
@@ -942,29 +1144,18 @@ export default function App() {
 
         candidateId = candidate.id;
 
-        const newCandidate = {
+        const newCandidate: CandidateState = {
           id: candidate.id,
           name: candidateName,
-          overallScore: 0,
-          criteriaScores: {
-            "strategic-thinking": 0,
-            leadership: 0,
-            communication: 0,
-            innovation: 0,
-            "problem-solving": 0,
-            collaboration: 0,
-            adaptability: 0,
-            "decision-making": 0,
-            "emotional-intelligence": 0,
-            "digital-fluency": 0,
-          },
-          status: "not_started" as const,
-          timeSpent: 0,
-          caseStudy,
-          redFlags: [],
           email: "",
           department: "",
           position: "",
+          overallScore: 0,
+          criteriaScores: emptyCriteriaScores(),
+          status: "not_started",
+          timeSpent: 0,
+          caseStudy,
+          redFlags: [],
           submissionDate: undefined,
         };
 
@@ -976,16 +1167,21 @@ export default function App() {
       }
     }
 
+    if (!candidateId) {
+      toast.error("Candidate not found / not created");
+      return;
+    }
+
     try {
       const { data: assignment, error } = await supabase
-        .from('assignments')
+        .from("assignments")
         .insert({
           event_id: currentEvent.id,
           assessor_id: appUser.id,
           candidate_id: candidateId,
-          type: 'individual',
+          type: "individual",
           case_study: caseStudy,
-          status: 'not_started',
+          status: "not_started",
         })
         .select()
         .single();
@@ -995,6 +1191,7 @@ export default function App() {
       const newAssignment: Assignment = {
         id: assignment.id,
         type: "individual",
+        candidateId,
         candidateName,
         status: "not_started",
         maxScore: 100,
@@ -1005,18 +1202,13 @@ export default function App() {
       setCurrentAssignment(newAssignment);
       setCurrentView("individual-scoring");
 
-      toast.success(
-        isNewCandidate
-          ? `Starting assessment for new candidate: ${candidateName}`
-          : `Starting assessment for: ${candidateName}`
-      );
+      toast.success(isNewCandidate ? `Starting assessment for new candidate: ${candidateName}` : `Starting assessment for: ${candidateName}`);
     } catch (error) {
       console.error("Error creating assignment:", error);
       toast.error("Failed to create assignment");
     }
   };
 
-  // FIXED: Start group assessment directly via Supabase
   const handleStartGroupAssessment = async (groupId: string, caseStudy: string) => {
     if (!currentEvent || !appUser) {
       toast.error("No active event or user");
@@ -1031,14 +1223,14 @@ export default function App() {
 
     try {
       const { data: assignment, error } = await supabase
-        .from('assignments')
+        .from("assignments")
         .insert({
           event_id: currentEvent.id,
           assessor_id: appUser.id,
           group_id: groupId,
-          type: 'group',
+          type: "group",
           case_study: caseStudy,
-          status: 'not_started',
+          status: "not_started",
         })
         .select()
         .single();
@@ -1048,6 +1240,7 @@ export default function App() {
       const newAssignment: Assignment = {
         id: assignment.id,
         type: "group",
+        groupId,
         groupName: group.name,
         status: "not_started",
         maxScore: 100,
@@ -1057,12 +1250,22 @@ export default function App() {
       setAssignments((prev) => [...prev, newAssignment]);
       setCurrentAssignment(newAssignment);
       setCurrentView("group-scoring");
+
       toast.success(`Starting group assessment for: ${group.name}`);
     } catch (error) {
       console.error("Error creating assignment:", error);
       toast.error("Failed to create assignment");
     }
   };
+
+  // ---------- VIEW HELPERS ----------
+  const handleViewAnalytics = () => setCurrentView("analytics");
+  const handleViewManagement = () => setCurrentView("management");
+
+  const currentGroupForScoring = useMemo(() => {
+    if (!currentAssignment?.groupId) return null;
+    return groups.find((g) => g.id === currentAssignment.groupId) || null;
+  }, [currentAssignment?.groupId, groups]);
 
   // ---------- RENDER ----------
   if (isLoading) {
@@ -1074,12 +1277,8 @@ export default function App() {
             <div className="w-20 h-20 border-4 border-slate-600 border-t-transparent rounded-full animate-spin mx-auto absolute top-0" />
           </div>
           <div className="space-y-3">
-            <h2 className="text-2xl font-semibold gradient-text-premium">
-              Loading Assessment Platform
-            </h2>
-            <p className="text-muted-foreground text-lg">
-              Preparing your sophisticated experience...
-            </p>
+            <h2 className="text-2xl font-semibold gradient-text-premium">Loading Assessment Platform</h2>
+            <p className="text-muted-foreground text-lg">Preparing your sophisticated experience...</p>
           </div>
         </div>
       </div>
@@ -1114,8 +1313,7 @@ export default function App() {
             <div className="text-center space-y-4">
               <h2 className="text-2xl font-semibold gradient-text-premium">Initialize System</h2>
               <p className="text-muted-foreground">
-                It looks like this is a fresh installation. Would you like to initialize the system
-                with demo data?
+                It looks like this is a fresh installation. Would you like to initialize the system with demo data?
               </p>
               <div className="flex gap-4 justify-center">
                 <button
@@ -1167,18 +1365,21 @@ export default function App() {
                   >
                     <span className="font-semibold">Start New Assessment</span>
                   </button>
+
                   <button
                     onClick={handleViewManagement}
                     className="px-8 py-4 bg-gradient-to-r from-slate-600 to-slate-700 text-white rounded-2xl hover:from-slate-700 hover:to-slate-800 transition-all duration-500 transform hover:scale-105 hover:-translate-y-1 card-shadow-lg hover:shadow-xl focus-elegant"
                   >
                     <span className="font-semibold">Candidate Management</span>
                   </button>
+
                   <button
                     onClick={handleViewAnalytics}
                     className="px-8 py-4 bg-gradient-to-r from-slate-500 to-slate-600 text-white rounded-2xl hover:from-slate-600 hover:to-slate-700 transition-all duration-500 transform hover:scale-105 hover:-translate-y-1 card-shadow-lg hover:shadow-xl focus-elegant"
                   >
                     <span className="font-semibold">Performance Analytics</span>
                   </button>
+
                   {appUser.role === "admin" && (
                     <>
                       <button
@@ -1214,7 +1415,10 @@ export default function App() {
 
         {currentView === "individual-scoring" && currentAssignment && (
           <IndividualScoringPage
-            candidateId={candidates.find((c: any) => c.name === currentAssignment.candidateName)?.id}
+            candidateId={
+              currentAssignment.candidateId ||
+              candidates.find((c) => c.name === currentAssignment.candidateName)?.id
+            }
             candidateName={currentAssignment.candidateName!}
             assignmentId={currentAssignment.id}
             caseStudy={currentAssignment.caseStudy}
@@ -1229,17 +1433,15 @@ export default function App() {
 
         {currentView === "group-scoring" && currentAssignment && (
           <GroupScoringPage
-            groupId="group-1"
-            groupName={currentAssignment.groupName!}
+            groupId={currentAssignment.groupId || ""}
+            groupName={currentAssignment.groupName || "Group"}
             assignmentId={currentAssignment.id}
             caseStudy={currentAssignment.caseStudy}
             members={
-              groups
-                .find((g) => g.id === "group-1")
-                ?.memberIds.map((id) => {
-                  const candidate = candidates.find((c: any) => c.id === id);
-                  return candidate ? { id: candidate.id, name: candidate.name } : { id, name: "Unknown" };
-                }) || []
+              currentGroupForScoring?.memberIds.map((id) => {
+                const candidate = candidates.find((c) => c.id === id);
+                return candidate ? { id: candidate.id, name: candidate.name } : { id, name: "Unknown" };
+              }) || []
             }
             onBack={handleBackToDashboard}
             onSave={handleSaveAssessment}
@@ -1303,11 +1505,7 @@ export default function App() {
 
       <HelpModal isOpen={showHelp} onClose={() => setShowHelp(false)} userRole={appUser?.role} />
 
-      <AddCandidateModal
-        isOpen={showAddCandidate}
-        onClose={() => setShowAddCandidate(false)}
-        onAddCandidate={handleAddCandidate}
-      />
+      <AddCandidateModal isOpen={showAddCandidate} onClose={() => setShowAddCandidate(false)} onAddCandidate={handleAddCandidate} />
 
       <Toaster />
     </div>
